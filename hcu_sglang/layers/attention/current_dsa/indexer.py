@@ -196,6 +196,9 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
             "glm5next_text",
             "glm5_next_text",
         )
+        from sglang.srt.configs.model_config import is_glm_moe_dsa
+
+        self.hcu_glm_dsa_bf16_head_gates = _is_hcu and is_glm_moe_dsa(config)
         self.use_dsa_indexer_fusion = (
             not self.glm5_next_fp32_head_gates
             and _is_cuda
@@ -561,6 +564,10 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
         if self.glm5_next_fp32_head_gates:
             weights, _ = self.weights_proj(x.float())
             return weights.float()
+        if self.hcu_glm_dsa_bf16_head_gates:
+            # The adapter's CUDA facade must preserve native HIP BF16 rounding.
+            weights, _ = self.weights_proj(x)
+            return weights
         if _is_cuda:
             return torch.mm(x, self.weights_proj.weight.t(), out_dtype=torch.float32)
 
