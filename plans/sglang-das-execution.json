@@ -22,9 +22,9 @@
   },
   "semantics": "File dispositions are review records, not a runtime equivalence or completion percentage. Unlisted decisions remain pending. Historical mapping clues never imply validation.",
   "summary": {
-    "pending": 2888,
+    "pending": 2885,
     "implemented": 44,
-    "in_progress": 52,
+    "in_progress": 55,
     "upstream": 26
   },
   "files": [
@@ -14127,7 +14127,16 @@
       "relation": "changed",
       "fork_oid": "902633ee20ac87e8c2e403ad577f80458ada30c0",
       "official_oid": "9b7760df0aa840f6248a27877ad4d07f92319fd8",
-      "status": "pending"
+      "status": "in_progress",
+      "ownership_review_20261105": {
+        "owner": "plugin",
+        "rationale": "Official baa9bef already provides the base DSA LayerSplit pool and CP helpers. Preserve that implementation; review only DAS additions (MainKVPagePlan, compact page layout, scratch sharing and transport) for plugin ownership. Existing module presence is not a fork-only integration gap.",
+        "official_sha": "baa9befa381511cd4d56f83980951e5a45fffc6d",
+        "fork_sha": "15c7204b7a3b6edaa222cff80018d8e5f2b2ad0e",
+        "runtime_alignment": "unverified",
+        "next_gate": "Complete actual prefill/decode/MTP/graph call and same-input numerical alignment before runtime changes."
+      },
+      "rationale": "Official baa9bef already provides the base DSA LayerSplit pool and CP helpers. Preserve that implementation; review only DAS additions (MainKVPagePlan, compact page layout, scratch sharing and transport) for plugin ownership. Existing module presence is not a fork-only integration gap."
     },
     {
       "path": "python/sglang/srt/mem_cache/dsv41_request_window.py",
@@ -16496,7 +16505,16 @@
       "relation": "fork_only",
       "fork_oid": "d7bd48ac27381a801baaa2a277947b6ab9af08aa",
       "official_oid": null,
-      "status": "pending"
+      "status": "in_progress",
+      "ownership_review_20261105": {
+        "owner": "plugin",
+        "rationale": "VP core, process groups, vocabulary partitioning and top-1 reduction remain fork-owned.",
+        "official_sha": "baa9befa381511cd4d56f83980951e5a45fffc6d",
+        "fork_sha": "15c7204b7a3b6edaa222cff80018d8e5f2b2ad0e",
+        "runtime_alignment": "unverified",
+        "next_gate": "Complete actual prefill/decode/MTP/graph call and same-input numerical alignment before runtime changes."
+      },
+      "rationale": "VP core, process groups, vocabulary partitioning and top-1 reduction remain fork-owned."
     },
     {
       "path": "python/sglang/srt/speculative/draft_utils.py",
@@ -16648,7 +16666,16 @@
       "relation": "changed",
       "fork_oid": "40d0cb7e1290e9b98eb908a50b051413d3fbb89d",
       "official_oid": "2ddca4bc97c1d09a38a85c14bd4c0924c1e6c137",
-      "status": "pending"
+      "status": "in_progress",
+      "ownership_review_20261105": {
+        "owner": "plugin",
+        "rationale": "VP initialization and consumption and LayerSplit draft scratch wiring require plugin ownership.",
+        "official_sha": "baa9befa381511cd4d56f83980951e5a45fffc6d",
+        "fork_sha": "15c7204b7a3b6edaa222cff80018d8e5f2b2ad0e",
+        "runtime_alignment": "unverified",
+        "next_gate": "Complete actual prefill/decode/MTP/graph call and same-input numerical alignment before runtime changes."
+      },
+      "rationale": "VP initialization and consumption and LayerSplit draft scratch wiring require plugin ownership."
     },
     {
       "path": "python/sglang/srt/speculative/frozen_kv_mtp_worker_v2.py",

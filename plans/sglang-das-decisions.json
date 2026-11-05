@@ -1678,5 +1678,41 @@
       "tests/runtime/rust_events_native.py"
     ],
     "validation_scope": "Owned source data and actual CPU Rust binding/Source C++/hashlib oracle; raw tuple ABI and event parity with Source Python recorder. Cargo suite separately recorded. Rust GPU/L3/model/retention and remaining Python adapter changes pending."
+  },
+  "python/sglang/srt/speculative/draft_lm_head_vp.py": {
+    "status": "in_progress",
+    "ownership_review_20261105": {
+      "owner": "plugin",
+      "rationale": "VP core, process groups, vocabulary partitioning and top-1 reduction remain fork-owned.",
+      "official_sha": "baa9befa381511cd4d56f83980951e5a45fffc6d",
+      "fork_sha": "15c7204b7a3b6edaa222cff80018d8e5f2b2ad0e",
+      "runtime_alignment": "unverified",
+      "next_gate": "Complete actual prefill/decode/MTP/graph call and same-input numerical alignment before runtime changes."
+    },
+    "rationale": "VP core, process groups, vocabulary partitioning and top-1 reduction remain fork-owned."
+  },
+  "python/sglang/srt/speculative/eagle_worker_v2.py": {
+    "status": "in_progress",
+    "ownership_review_20261105": {
+      "owner": "plugin",
+      "rationale": "VP initialization and consumption and LayerSplit draft scratch wiring require plugin ownership.",
+      "official_sha": "baa9befa381511cd4d56f83980951e5a45fffc6d",
+      "fork_sha": "15c7204b7a3b6edaa222cff80018d8e5f2b2ad0e",
+      "runtime_alignment": "unverified",
+      "next_gate": "Complete actual prefill/decode/MTP/graph call and same-input numerical alignment before runtime changes."
+    },
+    "rationale": "VP initialization and consumption and LayerSplit draft scratch wiring require plugin ownership."
+  },
+  "python/sglang/srt/mem_cache/dsa_cache_layer_split.py": {
+    "status": "in_progress",
+    "ownership_review_20261105": {
+      "owner": "plugin",
+      "rationale": "Official baa9bef already provides the base DSA LayerSplit pool and CP helpers. Preserve that implementation; review only DAS additions (MainKVPagePlan, compact page layout, scratch sharing and transport) for plugin ownership. Existing module presence is not a fork-only integration gap.",
+      "official_sha": "baa9befa381511cd4d56f83980951e5a45fffc6d",
+      "fork_sha": "15c7204b7a3b6edaa222cff80018d8e5f2b2ad0e",
+      "runtime_alignment": "unverified",
+      "next_gate": "Complete actual prefill/decode/MTP/graph call and same-input numerical alignment before runtime changes."
+    },
+    "rationale": "Official baa9bef already provides the base DSA LayerSplit pool and CP helpers. Preserve that implementation; review only DAS additions (MainKVPagePlan, compact page layout, scratch sharing and transport) for plugin ownership. Existing module presence is not a fork-only integration gap."
   }
 }

@@ -1625,3 +1625,21 @@ P23 两组短前缀各自八 CP rank 的 248 项早期 norm 张量对照均逐�
 正式入口复验还发现底座已注册同名 custom op，重复注册会被跳过并落回未导入 LightOp 的底座 helper。插件桥接改用独立的 `sglang::hcu_moe_fused_gate` 名称及既有 fake shape 契约，公共 LightOp 计算与参数保持不变。两个开关在启动脚本中设置，Graph 保留捕获时的 provider，不提供运行中的热切换。
 
 三个固定开关的独立进程完成对照：旧版关闭与新版关闭的 48 份真实输入输出逐元素一致；独立上下文与先前服务捕获之间的少量 FP32 权重 ULP 差异同时存在于旧版，不能归为新回归。最终启用探针 v7 的 16 组 logits、路由权重和专家 ID 共 48 份输出逐元素匹配来源分支及公共 LightOp 参考，两次更改真实输入与有效 token 数的 Graph 重放也精确匹配。无量化、Hash-MoE、DSV4、其他 architecture 的四项构造门控及 FP32 权重优先分支通过；范围检查曾错误保留 GLM architecture 的夹具和先前失败均留档。722 份运行时资产在执行后再次校验一致。组件记录为任务产物 `moe-gate-v1/qualification-v7.json`、`routing-v6-cross-baseline.json` 与 `routing-v7-new-on.json`；全模型精度、有限验证矩阵和最终 profile 仍未验收。
+
+## 2026-11-05 VP 与 LayerSplit 功能归属复核
+
+社区基线为 `baa9befa381511cd4d56f83980951e5a45fffc6d`，DAS 来源为 `15c7204b7a3b6edaa222cff80018d8e5f2b2ad0e`，plugin 整理起点为 `9faa706d8b8c1ebcec680395634fe21ed2fd0f15`。新增机制归 plugin，社区已有行为的 HCU 兼容归 adapter；社区源码保持原样。
+
+VP 主体和 EAGLE 初始化、消费仍在 fork，plugin 输出字段不构成完整迁移。固定 Git 对象核对确认：社区基线已包含基础 DSA LayerSplit 池及 CP helper，不能把整个模块视为 fork 专有。只审查 DAS 新增的 MainKVPagePlan、紧凑布局、scratch 和传输差异；工厂、模型消费者及生命周期仍须逐项核对。对应路径在 plans/sglang-das-decisions.json 标为 in_progress，运行对齐为未验证。
+
+本轮独立工作区仅整理归属台账，未修改运行时代码或部署。先补齐实际调用、数学语义和 graph 变输入重放证据，再做最小迁移；既有局部检查不能关闭完整功能链缺口。
+
+### 全量盘点工具与范围修正
+
+整理范围覆盖两仓全部代码及固定 fork 与社区的完整差异，VP/LayerSplit 仅为首批审阅条目。build_migration_plan 原来只扫描旧包名 sglang_hcu_plugin 和已移除的 targets_v0_5_22.json，现兼容当前 hcu_sglang 与 expected_hook_targets 合同，并保留历史包名和列表格式。这是盘点工具修复，未改变推理行为。
+
+重新采集得到 2028 个修改路径、903 个 fork 独有路径、79 个社区独有路径；运行时待审阅路径 1614 个，合同目标 599 个，源码映射线索 473 个。目标匹配到来源文件不等于 Hook 已应用或功能验收，均不可据此计算迁移完成率。完整 Python AST 对照覆盖记录中有 1494 项差异、26 项等价和 14 项文件模式或种类差异。
+
+固定 Git 树对照已完成；本地浅历史无法提供 merge-base，历史归因清单仍不完整，不伪造共同祖先。四仓审计、当前树差异和新版全量盘点为独立产物。运行时改动须先满足实际调用与数学语义对齐要求。全量整理完成后，将通用流程写入适用 AGENTS.md，固定提交交主对话验证，通过后再提 PR。现有两个草稿 PR 保留待逐项处置。
+
+本次实际检查：全量盘点 CLI 成功；固定 Ruff 0.12.1 的 CI 策略检查、Python AST 语法检查、迁移执行台账快照、离线导览快照、L0 和 git diff --check。未新增单测；没有用工具检查结果替代运行验证。
