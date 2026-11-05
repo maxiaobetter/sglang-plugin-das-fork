@@ -1687,7 +1687,21 @@
       "official_sha": "baa9befa381511cd4d56f83980951e5a45fffc6d",
       "fork_sha": "15c7204b7a3b6edaa222cff80018d8e5f2b2ad0e",
       "runtime_alignment": "unverified",
-      "next_gate": "Complete actual prefill/decode/MTP/graph call and same-input numerical alignment before runtime changes."
+      "next_gate": "Complete actual prefill/decode/MTP/graph call and same-input numerical alignment before runtime changes.",
+      "migration_source": "plans/glm53-vp-source.json",
+      "source_selection": "Use the native image implementation, matching maxiaobetter/sglang-das glm5.3-w4a8 at ac17298aeae1b149a17c4ce964619c782832d6a4; do not substitute the HYGON inventory implementation.",
+      "candidate_implementation": [
+        "hcu_sglang/speculative_vp/core.py",
+        "hcu_sglang/speculative_vp/config.py",
+        "hcu_sglang/speculative_vp/__init__.py"
+      ],
+      "candidate_status": "code_prepared_runtime_unverified",
+      "required_runtime_evidence": [
+        "actual hook bindings and shared weight identity",
+        "VP group ranks and collective participation including idle ranks",
+        "same-input native/component outputs",
+        "graph replay with changed inputs"
+      ]
     },
     "rationale": "VP core, process groups, vocabulary partitioning and top-1 reduction remain fork-owned."
   },
@@ -1699,7 +1713,21 @@
       "official_sha": "baa9befa381511cd4d56f83980951e5a45fffc6d",
       "fork_sha": "15c7204b7a3b6edaa222cff80018d8e5f2b2ad0e",
       "runtime_alignment": "unverified",
-      "next_gate": "Complete actual prefill/decode/MTP/graph call and same-input numerical alignment before runtime changes."
+      "next_gate": "Complete actual prefill/decode/MTP/graph call and same-input numerical alignment before runtime changes.",
+      "migration_source": "plans/glm53-vp-source.json",
+      "source_selection": "Use the native image implementation, matching maxiaobetter/sglang-das glm5.3-w4a8 at ac17298aeae1b149a17c4ce964619c782832d6a4; do not substitute the HYGON inventory implementation.",
+      "candidate_implementation": [
+        "hcu_sglang/speculative_vp/worker.py",
+        "hcu_sglang/speculative_vp/logits.py",
+        "hcu_sglang/speculative_vp/__init__.py"
+      ],
+      "candidate_status": "code_prepared_runtime_unverified",
+      "required_runtime_evidence": [
+        "actual hook bindings and shared weight identity",
+        "VP group ranks and collective participation including idle ranks",
+        "same-input native/component outputs",
+        "graph replay with changed inputs"
+      ]
     },
     "rationale": "VP initialization and consumption and LayerSplit draft scratch wiring require plugin ownership."
   },

@@ -345,6 +345,8 @@
     "sglang.srt.layers.linear.ReplicatedLinear.forward",
     "sglang.srt.layers.linear.RowParallelLinear.forward",
     "sglang.srt.layers.linear._resolve_linear_group",
+    "sglang.srt.layers.logits_processor.LogitsMetadata.from_forward_batch",
+    "sglang.srt.layers.logits_processor.LogitsProcessor.forward",
     "sglang.srt.layers.logits_processor.LogitsProcessorOutput",
     "sglang.srt.layers.moe.ep_moe.layer.DeepEPMoE.__init__",
     "sglang.srt.layers.moe.ep_moe.layer.DeepEPMoE.run_moe_core",
@@ -597,6 +599,8 @@
     "sglang.srt.speculative.dspark_components.dspark_worker_v2.DSparkWorkerV2.init_cuda_graphs",
     "sglang.srt.speculative.eagle_utils._sync_eagle_verify_outputs",
     "sglang.srt.speculative.eagle_worker_common.prepare_for_draft",
+    "sglang.srt.speculative.eagle_worker_v2.EagleDraftWorker.draft_forward",
+    "sglang.srt.speculative.eagle_worker_v2.EagleDraftWorker.init_lm_head",
     "sglang.srt.speculative.spec_utils.commit_mamba_states_after_verify",
     "sglang.srt.utils.common.get_cuda_graph_batch_size_alignment"
   ],
