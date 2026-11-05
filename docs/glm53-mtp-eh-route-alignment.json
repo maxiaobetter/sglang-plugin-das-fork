@@ -57,9 +57,30 @@
         "passed": true
       }
     },
-    "updated_wheel": "pending",
-    "service_profile": "pending",
-    "full_model_accuracy": "not run, per user order",
+    "updated_wheel": {
+      "runtime_commit": "ae3160f514fe257fd5f3a7482b75028c854e2cab",
+      "sha256": "bba953253c12440df66fcb213aed63d260b79fd5210585ea92bf7ab55a74b736",
+      "site": "/work/ownership-v1/site-eh-route-v1",
+      "package_runtime_files": 729,
+      "changed_runtime_files": [
+        "models/deepseek/deepseek_nextn/methods/model.py"
+      ],
+      "installed_public_constructor_and_forward": "20 actual cases and 10 updated-input graph replays passed"
+    },
+    "service_profile": {
+      "artifact": "profile-final-pd-curl-v1/trace-validation.json",
+      "sha256": "1180b021ed53428eaafd13febe201c6abff812549ce41aa76484379ed7483b1f",
+      "ranks": {
+        "prefill": 16,
+        "decode": 16
+      },
+      "data_requests": "curl directly POST to decode: cold DP0, 4095 input / 64 output; warm DP8, 4096 input / 64 output with 4032 cached prefix tokens",
+      "diagnostic_plugins": [],
+      "runtime_files_verified_per_node": 6887,
+      "item2": "Raw traces delivered for user review; FlashMLA visibility cause remains unverified",
+      "profiling_warning": "ROCTracer duplicate flow start warnings retained in raw logs and validation report"
+    },
+    "full_model_accuracy": "Not run, per user instruction",
     "local_checks": {
       "ruff": "0.12.1 E9/F63/F7/F82 --isolated --ignore-noqa passed",
       "l0": "565 Python files passed",
