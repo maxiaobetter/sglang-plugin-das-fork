@@ -102,7 +102,7 @@ def replacement_sparse_moe_init(original_fn, self, *args, **kwargs):
 
     from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
     from sglang.srt.layers.moe.topk import TopK
-    from sglang.srt.model_parallel.parallel_state import (
+    from sglang.srt.distributed.parallel_state import (
         get_moe_expert_parallel_world_size,
     )
     from sglang.srt.utils import add_prefix

@@ -1030,7 +1030,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
 
         _deepep_precompile_tp_barrier()
         npu_quantization_opts = self._get_quantization_kwargs(buffer)
-        needs_256_alignment = _hcu_deepgemm_is_selected() or (
+        needs_256_alignment = self.quant_config.get("normal_expert_alignment") == 256 or _hcu_deepgemm_is_selected() or (
             use_groupgemm
             and (
                 get_model().quantization
