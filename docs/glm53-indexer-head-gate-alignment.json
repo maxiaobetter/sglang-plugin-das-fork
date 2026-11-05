@@ -49,11 +49,27 @@
     "baseline_graph_replays_per_image": 6
   },
   "fix": "HCU GLM DSA main/NextN uses existing BF16 ReplicatedLinear projection before scaling; retain explicit GLM-next FP32 branch and other architecture branches",
-  "fix_validation": "pending same-input requalification of the fixed wheel and changed-input graph replay",
+  "fix_validation": {
+    "plugin_runtime_commit": "a587338d40938d267968c210b69a3ce8fb5b3f95",
+    "plugin_wheel_sha256": "17060bebd4d32fef9b970c14d714fc9a88ad78b6f56c04fc3fcd909b5ee827c3",
+    "installed_indexer_sha256": "5e38ef8958cd1602032febd5bcb0bc49eb558596c29c41dbace66e41c943c70b",
+    "case_rank_pairs": 16,
+    "raw_and_compiled_scaled_head_gates_exact_native": true,
+    "changed_input_graph_replays": 6,
+    "graph_exact_own_eager": true,
+    "actual_constructor_wiring_verified": false,
+    "model_accuracy_verified": false
+  },
   "remaining": [
     "constructor wiring and actual service consumer readout",
     "Hadamard and index-K INT8 scale/cache/logits/Top-K",
     "decode graph attention visibility and metadata",
     "remaining operator alignment rows, unchanged-threshold model accuracy after closure"
-  ]
+  ],
+  "raw_evidence_archive": {
+    "name": "indexer-and-flashmla-v1-20261105.tar",
+    "sha256": "a88b163ee4e9e0209f23578d34e114c0035348120c1bcafb7bcafce6593fa16d",
+    "bytes": 10721280,
+    "files_all_locally_sha256_verified": 33
+  }
 }

@@ -1715,3 +1715,5 @@ DSA 条件算子使用宿主模块的明确限定引用，保留原有平台门�
 本次最小修正限定 HCU 的 GLM DSA main/NextN 架构，先调用原有 BF16 weights_proj，再执行原有缩放；保留显式 GLM-next FP32 分支及其他架构路径。没有改公共平台判断、量化方案或 vendor wheel。相同 16 组 fused LayerNorm/RoPE 输入在两镜像与各自实测 cache 下完全一致，未据 cache dtype 差异改动该算子。
 
 修正前两镜像各完成 6 次变输入 graph replay，与各自 eager 一致；这不能证明跨镜像数学对齐。修正 wheel 的同输入及 graph 复验待执行，构造接线、完整 Indexer 和 decode attention graph 仍未关闭；不宣称整模型精度问题已解决。新分支 `fix/glm53-indexer-head-gates` 从固定 plugin 提交隔离建立，原交接分支与两份已安装 wheel 均保留。未新增单测，整模型复测仍等待算子清单关闭。
+
+修正后组件复验：runtime 提交 `a587338d` 的独立 plugin wheel（SHA256 `17060beb…ee827c3`）在相同 16 组真实输入上，投影原始值及编译后的缩放值均与原生逐值一致；6 次变输入 graph replay 与对应 eager 一致。实际构造器字段接线和服务消费者仍未验证，不能外推为完整 Indexer 或整模型验收。33 个原始输入、输出、源码与报告文件已归档并在本地逐份核对哈希，归档标识见组件证据 JSON。修正代码通过 Python 3.12 的项目 L0、migration/guide 快照、Ruff 0.12.1 CI 选项、AST 与 diff 检查；没有运行新增单测或完整本地测试套件。
