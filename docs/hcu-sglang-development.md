@@ -1663,3 +1663,15 @@ VP 主体和 EAGLE 初始化、消费仍在 fork，plugin 输出字段不构成�
 消费者基于固定社区 draft_forward 保留当前接口，只补入镜像的 VP 三处行为：关闭 CUDA topk1 链直接写入、消费 VP token/probability 并递增位置、按真实词表大小检查 token 范围。拒绝采样、动态步数、多层 EAGLE、LoRA、FP32 LM-head、token map 等不支持组合仍拒绝。Graph 继续经 worker 的 draft_forward 调用；未添加另一份 graph runner。
 
 验证状态：源码一致性及静态接口核对已执行；本地 CI 等价 lint、语法与结构门禁记录见本次提交。真实 collective、所有参与 rank 的 idle/non-idle、同输入输出对拍、更换输入 graph replay、初始化共享权重的实际身份及元数据旧引用仍未验证。此候选不得直接替换正在进行精度排查的主对话环境；先补齐上述组件证据，再做整模型验证。全量归属整理仍在进行，VP 候选不代表 LayerSplit 或其他功能已经完成。
+
+## 2026-11-05 LayerSplit 接线与镜像增量候选
+
+核对节点 21 原生容器的 DSA LayerSplit 池、KVCacheConfigurator、ModelRunner 和 CP helper，四个文件与用户指定 ac17298 分支逐字节一致，见 [LayerSplit 来源](../plans/glm53-layersplit-source.json)。既有 plugin 池方法与镜像逐项 AST 对照，除两项环境变量能力缺失及三项社区接口兼容外，方法 AST 相同；该检查不是执行验证。
+
+新增 `mem_cache/dsa_layer_split_integration.py`，把 EAGLE alloc_memory_pool 前的 scratch-source 生产落到 plugin，保留镜像的 prefill、PP1、单层 EAGLE/NextN、非 EAGLE3、目标池类型限制。ModelRunner.init_kv_cache_configurator 通过作用域 ContextVar 将源池传给 plugin 的 configurator 子类，构造结束无论成功失败都 reset；子类用独立字段持续持有源池，不在 slotted 社区实例上动态添字段。替换 configurator 定义和 ModelRunner 已导入别名，避免调用者仍实例化旧类。
+
+共享源存在时，draft 工厂沿当前社区参数接口构造 plugin LayerSplit 池，传入源池与 CP size - 1 的 owner offset；这与镜像的最后一个 CP rank 持有单层 draft 一致。无共享源时调用当前有效父类工厂。已有 CP 预算 helper、scratch geometry 校验、stream 等待、前一使用者缓存失效和独立 Index-K 缓冲区继续复用。没有移动社区基础 LayerSplit，也没有改动社区源码。
+
+池中另补齐镜像原方法的两个缺失分支：`SGLANG_HCU_COMPACT_INDEX_BROADCAST=1` 的历史 Index-K page gather/broadcast/scatter（含 payload record_stream），以及 `SGLANG_HCU_LAYER_SPLIT_SYNC_PREFETCH=1` 的当前流预取。两个变量沿用镜像默认 0，不改变默认策略。set_mla_kv_buffer 的 WriteLoc 解包、CPU copy 的 req_pool_index 参数保留社区兼容。
+
+本轮只执行本地 CI 等价 lint、语法、快照和结构检查，不创建单测、不启动服务。真实类绑定、所有 CP rank 的 collective、共享 data_ptr、流切换失效、P/D 层映射及适用 graph 尚未验证，必须先完成组件对齐再交接整模型复测。VP 和 LayerSplit 均是候选；全量归属整理与最终 AGENTS.md 规则落盘仍未完成。

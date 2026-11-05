@@ -1739,7 +1739,20 @@
       "official_sha": "baa9befa381511cd4d56f83980951e5a45fffc6d",
       "fork_sha": "15c7204b7a3b6edaa222cff80018d8e5f2b2ad0e",
       "runtime_alignment": "unverified",
-      "next_gate": "Complete actual prefill/decode/MTP/graph call and same-input numerical alignment before runtime changes."
+      "next_gate": "Complete actual prefill/decode/MTP/graph call and same-input numerical alignment before runtime changes.",
+      "migration_source": "plans/glm53-layersplit-source.json",
+      "candidate_implementation": [
+        "hcu_sglang/mem_cache/dsa_layer_split_integration.py",
+        "hcu_sglang/mem_cache/dsa_cache_layer_split.py"
+      ],
+      "candidate_status": "code_prepared_runtime_unverified",
+      "required_runtime_evidence": [
+        "actual configurator and constructor bindings",
+        "target/draft scratch data pointer identity and ownership",
+        "all CP ranks same-input page-plan and payload comparisons",
+        "stream switching and changing-input graph replay where supported",
+        "P/D transfer and recipient layer mapping"
+      ]
     },
     "rationale": "Official baa9bef already provides the base DSA LayerSplit pool and CP helpers. Preserve that implementation; review only DAS additions (MainKVPagePlan, compact page layout, scratch sharing and transport) for plugin ownership. Existing module presence is not a fork-only integration gap."
   }
