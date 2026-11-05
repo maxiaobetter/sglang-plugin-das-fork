@@ -682,7 +682,7 @@ class LayerSplitDSATokenToKVPool(DSATokenToKVPool):
         index_cache = getattr(self, "index_key_cache", None)
         page_plan = getattr(self, "_active_main_kv_page_plan", None)
         if (
-            os.environ.get("SGLANG_HCU_COMPACT_INDEX_BROADCAST", "0") == "1"
+            os.environ.get("SGLANG_HCU_COMPACT_INDEX_BROADCAST", "1") == "1"
             and index_cache is not None
             and tensor is index_cache.remote_buffer
             and page_plan is not None
@@ -1258,9 +1258,9 @@ class LayerSplitDSATokenToKVPool(DSATokenToKVPool):
         # HCU draft broadcasts use a separate communicator and can stall on
         # a side stream after HiCache reload. Match the GLM5-Next path: keep
         # both draft Main-KV and Index-K on the forward stream, while target
-        # layers retain asynchronous prefetch.
+        # layers use the configured prefetch stream.
         if self.shares_layer_split_scratch or os.environ.get(
-            "SGLANG_HCU_LAYER_SPLIT_SYNC_PREFETCH", "0"
+            "SGLANG_HCU_LAYER_SPLIT_SYNC_PREFETCH", "1"
         ) == "1":
             return self.device_module.current_stream()
         return self.kv_broadcast_stream
