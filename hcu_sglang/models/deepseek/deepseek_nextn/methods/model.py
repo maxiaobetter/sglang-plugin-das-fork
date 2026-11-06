@@ -126,9 +126,15 @@ def __init__(
             self.rot_weight = N.load_file(rot_weight_path)
             self.rot_weight = self.rot_weight["rot.weight"].npu()
 
+    from sglang.srt.configs.model_config import is_glm_moe_dsa
+
     self.alt_stream = (
         N.torch.cuda.Stream()
-        if N._is_cuda or N.envs.SGLANG_NPU_USE_MULTI_STREAM.get() or M.is_sbo_enabled()
+        if (
+            (N._is_cuda and not (H.is_hcu() and is_glm_moe_dsa(config)))
+            or N.envs.SGLANG_NPU_USE_MULTI_STREAM.get()
+            or M.is_sbo_enabled()
+        )
         else None
     )
 
