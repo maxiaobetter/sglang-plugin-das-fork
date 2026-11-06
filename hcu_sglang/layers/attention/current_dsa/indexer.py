@@ -300,6 +300,10 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
             is_neox_style=is_neox_style,
             device=get_device().device,
         )
+        if self.hcu_glm_dsa_bf16_head_gates:
+            from hcu_sglang.layers.rotary import configure_glm_native_rope
+
+            configure_glm_native_rope(self.rotary_emb)
         if self.use_aiter_fused_fp8_writer and not (
             hasattr(self.rotary_emb, "cos_cache")
             and hasattr(self.rotary_emb, "sin_cache")

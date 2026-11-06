@@ -165,7 +165,7 @@ def forward_masked(self, dispatch_output):
     swiglu_limit = self.moe_runner_config.swiglu_limit
     if swiglu_limit is None:
         a2, a2_scale = fuse_silu_mul_quant_ep(
-            gate_up, tokens_per_expert=masked_m, expect_m=expected_m
+            gate_up, tokens_per_expert=masked_m
         )
     else:
         a2, a2_scale = fuse_silu_mul_clamp_quant_ep(

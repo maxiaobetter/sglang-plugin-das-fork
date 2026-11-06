@@ -103,6 +103,15 @@ class HcuRotaryFallback:
             self.original(positions, query, key, head_size, cache, is_neox)
 
 
+def configure_glm_native_rope(layer):
+    import sgl_kernel
+
+    layer.cos_sin_cache = layer.cos_sin_cache.to(dtype=layer.dtype)
+    layer._hcu_native_rope = HcuRotaryFallback(
+        torch.ops.sgl_kernel.rotary_embedding.default
+    )
+
+
 def after_rotary_init(result, layer, *args, **kwargs):
     if not is_hcu():
         return result
@@ -121,7 +130,9 @@ def after_rotary_init(result, layer, *args, **kwargs):
 
 def forward_cuda(original_fn, layer, positions, query, key, offsets=None,
                  fused_set_kv_buffer_arg=None):
-    native = getattr(layer, '_hcu_lightop_rope', None)
+    native = getattr(layer, '_hcu_native_rope', None)
+    if native is None:
+        native = getattr(layer, '_hcu_lightop_rope', None)
     if native is None or fused_set_kv_buffer_arg is not None:
         return original_fn(
             layer, positions, query, key, offsets=offsets,

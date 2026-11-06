@@ -215,6 +215,14 @@ def __init__(
             device=N0.get_device().device,
         )
 
+        from sglang.srt.configs.model_config import is_glm_moe_dsa
+        from hcu_sglang.utils.detection import is_hcu
+
+        if is_hcu() and is_glm_moe_dsa(config):
+            from hcu_sglang.layers.rotary import configure_glm_native_rope
+
+            configure_glm_native_rope(self.rotary_emb)
+
         if rope_scaling and rope_scaling.get("apply_yarn_scaling", True):
             self.scaling = N0.compute_mla_mscale_scaling(rope_scaling, self.scaling)
     else:

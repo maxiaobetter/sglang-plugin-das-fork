@@ -1165,6 +1165,8 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
 
     def set_quant_config(self, quant_config: dict) -> None:
         super().set_quant_config(quant_config)
+        if _is_hcu and quant_config.get("hcu_w4a8_int8_dispatch", False):
+            self.return_recv_hook = True
         if (
             _is_hcu
             and quant_config.get("hcu_w4a8_deepep_ll_producer_event", False)

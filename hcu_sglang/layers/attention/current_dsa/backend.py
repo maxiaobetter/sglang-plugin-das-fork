@@ -265,6 +265,15 @@ class DeepseekSparseAttnBackend(
             1 if get_exec().deterministic.enable_deterministic_inference else 0
         )
         hf_config = model_runner.model_config.hf_config
+        from sglang.srt.configs.model_config import is_glm_moe_dsa
+
+        self._concat_mla_absorb_q = concat_mla_absorb_q_general
+        if _is_hcu and is_glm_moe_dsa(hf_config):
+            from hcu_sglang.layers.attention.current_dsa.native_ops import (
+                concat_mla_absorb_q,
+            )
+
+            self._concat_mla_absorb_q = concat_mla_absorb_q
         self.use_dsa = is_deepseek_dsa(hf_config)
         assert self.use_dsa, "DSA backend only supports DeepSeek DSA"
         self.dsa_kv_cache_store_fp8 = (
@@ -2193,7 +2202,7 @@ class DeepseekSparseAttnBackend(
                 # already handed us the concatenated form and q_all is a
                 # zero-copy view of it. `not _is_hip` keeps CUDA byte-identical.
                 if q_all is None or not _is_hip:
-                    q_all = concat_mla_absorb_q_general(q_nope, q_rope)
+                    q_all = self._concat_mla_absorb_q(q_nope, q_rope)
             return self._forward_tilelang(
                 q_all=q_all,
                 kv_cache=kv_cache,
@@ -2300,7 +2309,7 @@ class DeepseekSparseAttnBackend(
                     kv_cache = _cat([k, k_rope], dim=-1)
 
             if q_rope is not None:
-                q_all = concat_mla_absorb_q_general(q_nope, q_rope)
+                q_all = self._concat_mla_absorb_q(q_nope, q_rope)
             skip_reused_topk_sort = (
                 _is_hcu
                 and envs.SGLANG_DSA_HCU_REUSE_SORTED_TOPK.get()
@@ -2331,7 +2340,7 @@ class DeepseekSparseAttnBackend(
             )
         elif dsa_impl == "flashinfer_sparse_mla":
             if q_rope is not None:
-                q_all = concat_mla_absorb_q_general(q_nope, q_rope)
+                q_all = self._concat_mla_absorb_q(q_nope, q_rope)
             if topk_transform_method == TopkTransformMethod.RAGGED:
                 page_table_1 = topk_indices
             return self._forward_flashinfer_sparse_mla(
@@ -2344,7 +2353,7 @@ class DeepseekSparseAttnBackend(
             )
         elif dsa_impl == "flashmla_kv":
             if q_rope is not None:
-                q_all = concat_mla_absorb_q_general(q_nope, q_rope)
+                q_all = self._concat_mla_absorb_q(q_nope, q_rope)
             return self._forward_flashmla_kv(
                 q_all=q_all,
                 kv_cache=kv_cache,
@@ -2503,7 +2512,7 @@ class DeepseekSparseAttnBackend(
 
         if dsa_impl == "flashmla_sparse":
             if q_rope is not None:
-                q_all = concat_mla_absorb_q_general(q_nope, q_rope)
+                q_all = self._concat_mla_absorb_q(q_nope, q_rope)
             return self._forward_flashmla_sparse(
                 q_all=q_all,
                 kv_cache=kv_cache,
@@ -2515,7 +2524,7 @@ class DeepseekSparseAttnBackend(
             )
         elif dsa_impl == "flashinfer_sparse_mla":
             if q_all is None:
-                q_all = concat_mla_absorb_q_general(q_nope, q_rope)
+                q_all = self._concat_mla_absorb_q(q_nope, q_rope)
             return self._forward_flashinfer_sparse_mla(
                 q_all=q_all,
                 kv_cache=kv_cache,
@@ -2526,7 +2535,7 @@ class DeepseekSparseAttnBackend(
             )
         elif dsa_impl == "flashmla_kv":
             if q_rope is not None:
-                q_all = concat_mla_absorb_q_general(q_nope, q_rope)
+                q_all = self._concat_mla_absorb_q(q_nope, q_rope)
             return self._forward_flashmla_kv(
                 q_all=q_all,
                 kv_cache=kv_cache,
@@ -2545,7 +2554,7 @@ class DeepseekSparseAttnBackend(
             # above and we can reuse it directly. The `not _is_hip` clause keeps
             # CUDA / MUSA paths byte-identical to pre-patch by always re-cat.
             if q_all is None or not _is_hip:
-                q_all = concat_mla_absorb_q_general(q_nope, q_rope)
+                q_all = self._concat_mla_absorb_q(q_nope, q_rope)
             return self._forward_tilelang(
                 q_all=q_all,
                 kv_cache=kv_cache,
@@ -3010,7 +3019,7 @@ class DeepseekSparseAttnBackend(
             concat_and_cast_q_fp8_pad(q_fp8, q_nope, q_rope, num_heads)
         else:
             # Generic fallback for non-power-of-two head counts.
-            q_fp8 = concat_mla_absorb_q_general(q_nope, q_rope).to(torch.float8_e4m3fn)
+            q_fp8 = self._concat_mla_absorb_q(q_nope, q_rope).to(torch.float8_e4m3fn)
 
         # Identity per-tensor scale, cached: creating it per call is a
         # host->device copy that synchronizes the stream.
@@ -3813,7 +3822,7 @@ class DeepseekSparseAttnBackend(
             q_rope_reshaped = q_rope.view(
                 -1, layer.tp_q_head_num, layer.head_dim - layer.v_head_dim
             )
-            q_all = concat_mla_absorb_q_general(q_nope, q_rope_reshaped)
+            q_all = self._concat_mla_absorb_q(q_nope, q_rope_reshaped)
         else:
             q_all = q.view(-1, layer.tp_q_head_num, layer.head_dim)
 
