@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hcu-sglang-plugin"
+version = "0.3.2.dev77"
+description = "SGLang HCU runtime plugin and development methods"
+requires-python = ">=3.10"
+dependencies = ["sglang==0.5.22"]
+license = {file = "LICENSE"}
+
+[project.entry-points."sglang.srt.plugins"]
+hcu = "hcu_sglang:register"
+
+[project.scripts]
+hcu-sglang-serve = "hcu_sglang.__main__:main"
+
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["hcu_sglang*"]
+exclude = ["hcu_sglang.__pycache__", "hcu_sglang.*.__pycache__"]
+
+[tool.setuptools.package-data]
+hcu_sglang = ["mem_cache/cpp_utils/*.cpp", "layers/attention/linear/csrc/*", "layers/moe/csrc/glm53_fp8_k1_indirect.cu", "layers/moe/csrc/glm53_fp8_k1_indirect.source.json", "layers/moe/csrc/glm53_fp8_prefill_ops.source.json", "layers/quantization/csrc/glm53_fp8_token_inverse.source.json", "layers/quantization/csrc/glm53_fp8_decode_skinny.source.json", "mem_cache/rust_tree_core/crate/**/*", "mem_cache/rust_tree_core/crate/.gitignore", "jit_overlay/**/*", "models/deepseek/current_v4/hcu_backend/csrc/*", "models/deepseek/current_v4/execution/aiter_intree_configs/**/*"]
+
+[tool.setuptools.exclude-package-data]
+hcu_sglang = ["**/__pycache__/*", "**/*.pyc"]

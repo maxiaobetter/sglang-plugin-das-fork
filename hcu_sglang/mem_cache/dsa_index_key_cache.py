@@ -1,0 +1,270 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
+from __future__ import annotations
+
+from contextlib import nullcontext
+from typing import TYPE_CHECKING
+
+import torch
+
+from sglang.kernels.ops.attention.dsa import index_buf_accessor
+from sglang.srt.constants import GPU_MEMORY_TYPE_KV_CACHE
+
+from hcu_sglang.mem_cache.dsa_index_cache_mode import IndexKCacheMode
+from hcu_sglang.utils.detection import is_hcu_native_fp8_supported
+
+if TYPE_CHECKING:
+    from sglang.srt.mem_cache.memory_pool import DSATokenToKVPool
+
+
+def _set_linear_k_and_scale(buf, loc, index_k, index_k_scale):
+    loc = loc.to(torch.int64)
+    num_pages, buf_numel_per_page = buf.shape
+    del num_pages
+    (num_tokens_to_write,) = loc.shape
+    num_index_k, index_head_dim = index_k.shape
+    if index_k_scale.ndim == 1:
+        num_scales, scale_dim = index_k_scale.shape[0], 1
+    elif index_k_scale.ndim == 2:
+        num_scales, scale_dim = index_k_scale.shape
+    else:
+        raise ValueError(
+            f"index_k_scale must be 1D or 2D, got shape {index_k_scale.shape}"
+        )
+    assert buf_numel_per_page == 64 * (128 + 4)
+    assert num_tokens_to_write == num_index_k == num_scales
+    assert index_head_dim == 128
+    assert scale_dim == 1
+    assert buf.dtype == torch.uint8
+    assert loc.dtype == torch.int64
+    if index_buf_accessor._is_fp8_fnuz:
+        fp8_dtype = torch.float8_e4m3fnuz
+    else:
+        fp8_dtype = torch.float8_e4m3fn
+    assert index_k.dtype == fp8_dtype
+    assert index_k_scale.dtype == torch.float32
+    assert buf.is_contiguous()
+    assert loc.is_contiguous()
+    assert index_k.is_contiguous()
+    assert index_k_scale.is_contiguous()
+    index_buf_accessor._set_k_and_s_triton_kernel[(num_tokens_to_write,)](
+        buf.view(fp8_dtype),
+        buf.view(torch.float32),
+        loc,
+        index_k,
+        index_k_scale,
+        index_k.stride(0),
+        PAGE_SIZE=64,
+        BUF_NUMEL_PER_PAGE=buf_numel_per_page,
+        NUM_K_ELEMS_PER_TOKEN=index_head_dim,
+        S_OFFSET_NBYTES_IN_PAGE=64 * index_head_dim,
+        PRESHUFFLE_TILE=0,
+    )
+
+
+class IndexKeyCache:
+    def __init__(self, pool: DSATokenToKVPool, index_buf_size: int):
+        self.pool = pool
+        self._hcu_linear_fp8_index_cache = (
+            type(self) is IndexKeyCache
+            and is_hcu_native_fp8_supported()
+            and getattr(pool, "index_k_cache_mode", None) is IndexKCacheMode.FP8_SCALED
+            and not getattr(pool, "layer_shard_enabled", False)
+            and pool.page_size == getattr(pool, "index_page_size", None) == 64
+            and getattr(pool, "index_kpool", None) == 1
+            and pool.index_head_dim == pool.quant_block_size == 128
+            and pool.index_k_with_scale_buffer_dtype == torch.uint8
+        )
+        num_pages = (index_buf_size + pool.page_size + 1) // pool.page_size
+        with pool.memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE):
+            with (
+                torch.cuda.use_mem_pool(pool.custom_mem_pool)
+                if pool.custom_mem_pool
+                else nullcontext()
+            ):
+                self.buffer = [
+                    torch.zeros(
+                        self._buffer_shape(self._layer_num_pages(i, num_pages)),
+                        dtype=pool.index_k_with_scale_buffer_dtype,
+                        device=pool.device,
+                    )
+                    for i in range(pool.indexer_layer_num)
+                ]
+
+    def _buffer_shape(self, num_pages: int) -> tuple[int, int]:
+        pool = self.pool
+        return (
+            num_pages,
+            pool.page_size
+            // pool.index_kpool
+            * (pool.index_head_dim + pool.index_head_dim // pool.quant_block_size * 4),
+        )
+
+    def _kernel_view(self, buffer: torch.Tensor) -> torch.Tensor:
+        pool = self.pool
+        kernel_pages_per_row = (
+            pool.page_size // pool.index_kpool // pool.index_page_size
+        )
+        return buffer.view(-1, buffer.shape[1] // kernel_pages_per_row)
+
+    def _layer_num_pages(self, layer_idx: int, num_pages: int) -> int:
+        layer_id = self.pool.indexer_layer_ids[layer_idx]
+        local_layer_idx = layer_id - self.pool.start_layer
+        return num_pages if self.pool._should_allocate_index_layer(local_layer_idx) else 0
+
+    def clear(self) -> None:
+        del self.buffer
+
+    def move(self, tgt_loc: torch.Tensor, src_loc: torch.Tensor) -> None:
+        if tgt_loc.numel() == 0:
+            return
+
+        page_size = self.pool.page_size
+        tgt_loc_flat = tgt_loc.view(-1).long()
+        src_loc_flat = src_loc.view(-1).long()
+        tgt_page = tgt_loc_flat // page_size
+        src_page = src_loc_flat // page_size
+        tgt_offset = tgt_loc_flat % page_size
+        src_offset = src_loc_flat % page_size
+
+        k_bytes_per_token = self.pool.index_head_dim
+        scale_bytes_per_token = (
+            self.pool.index_head_dim // self.pool.quant_block_size * 4
+        )
+        k_bytes_per_page = page_size * k_bytes_per_token
+
+        for index_k in self.buffer:
+            if index_k.shape[0] == 0:
+                continue
+            k_view = index_k[:, :k_bytes_per_page].view(
+                -1, page_size, k_bytes_per_token
+            )
+            scale_view = index_k[:, k_bytes_per_page:].view(
+                -1, page_size, scale_bytes_per_token
+            )
+            k_view[tgt_page, tgt_offset] = k_view[src_page, src_offset]
+            scale_view[tgt_page, tgt_offset] = scale_view[src_page, src_offset]
+
+    def get_local_buffer(self, layer_id: int) -> torch.Tensor:
+        if self.pool.layer_transfer_counter is not None:
+            self.pool.layer_transfer_counter.wait_until(
+                layer_id - self.pool.start_layer
+            )
+        return self._kernel_view(
+            self.buffer[self.pool._get_indexer_cache_index(layer_id)]
+        )
+
+    def get_write_buffer(self, layer_id: int) -> torch.Tensor:
+        """Return storage that is safe for an in-place fused cache write."""
+        return self.get_local_buffer(layer_id)
+
+    def get_buffer(self, layer_id: int) -> torch.Tensor:
+        return self.get_local_buffer(layer_id)
+
+    def get_k_and_scale(
+        self,
+        layer_id: int,
+        seq_len_tensor: torch.Tensor,
+        page_indices: torch.Tensor,
+        seq_len_sum: int,
+        max_seq_len: int,
+    ):
+        buf = self.get_buffer(layer_id)
+        getter = (
+            index_buf_accessor.GetKAndS.triton
+            if self._hcu_linear_fp8_index_cache
+            else index_buf_accessor.GetKAndS.execute
+        )
+        return getter(
+            self.pool,
+            buf,
+            page_indices=page_indices,
+            seq_len_tensor=seq_len_tensor,
+            seq_len_sum=seq_len_sum,
+            max_seq_len=max_seq_len,
+        )
+
+    def store_quantized(
+        self,
+        layer_id: int,
+        loc: torch.Tensor,
+        index_k: torch.Tensor,
+        index_k_scale: torch.Tensor,
+    ) -> None:
+        buf = self._kernel_view(
+            self.buffer[self.pool._get_indexer_cache_index(layer_id)]
+        )
+        if self._hcu_linear_fp8_index_cache:
+            _set_linear_k_and_scale(buf, loc, index_k, index_k_scale)
+            return
+        index_buf_accessor.SetKAndS.execute(
+            pool=self.pool,
+            buf=buf,
+            loc=loc,
+            index_k=index_k,
+            index_k_scale=index_k_scale,
+        )
+
+    def cpu_copy(self, indices):
+        # Retracted pages may be reused before resume, so offload index-K with KV.
+        page_indices = indices[:: self.pool.page_size] // self.pool.page_size
+        torch.cuda.synchronize()
+        index_k_cpu = []
+        chunk_size = self.pool.cpu_offloading_chunk_size
+        page_chunk_size = max(1, chunk_size // self.pool.page_size)
+        for layer_id in range(self.pool.indexer_layer_num):
+            index_k_cpu.append([])
+            if self.buffer[layer_id].shape[0] == 0:
+                continue
+            for i in range(0, len(page_indices), page_chunk_size):
+                chunk_page_indices = page_indices[i : i + page_chunk_size]
+                idx_cpu = self.buffer[layer_id][chunk_page_indices].to(
+                    "cpu", non_blocking=True
+                )
+                index_k_cpu[-1].append(idx_cpu)
+        torch.cuda.synchronize()
+        return index_k_cpu
+
+    def load_cpu_copy(self, index_k_cpu, indices) -> None:
+        page_indices = indices[:: self.pool.page_size] // self.pool.page_size
+        torch.cuda.synchronize()
+        chunk_size = self.pool.cpu_offloading_chunk_size
+        page_chunk_size = max(1, chunk_size // self.pool.page_size)
+        for layer_id in range(self.pool.indexer_layer_num):
+            if self.buffer[layer_id].shape[0] == 0:
+                continue
+            for i in range(0, len(page_indices), page_chunk_size):
+                chunk_page_indices = page_indices[i : i + page_chunk_size]
+                idx_cpu = index_k_cpu[layer_id][i // page_chunk_size]
+                assert idx_cpu.shape[0] == len(chunk_page_indices)
+                idx_chunk = idx_cpu.to(self.buffer[layer_id].device, non_blocking=True)
+                self.buffer[layer_id][chunk_page_indices] = idx_chunk
+        torch.cuda.synchronize()
+
+    def _item_len(self, layer_idx: int) -> int:
+        # 0-row layers (skip-topk, or non-owned under CP layer split) have no item.
+        buf = self.buffer[layer_idx]
+        return 0 if buf.shape[0] == 0 else buf[0].nbytes
+
+    def state_buf_infos(self):
+        layer_num = self.pool.indexer_layer_num
+        data_ptrs = [self.buffer[i].data_ptr() for i in range(layer_num)]
+        data_lens = [self.buffer[i].nbytes for i in range(layer_num)]
+        item_lens = [self._item_len(i) for i in range(layer_num)]
+        return data_ptrs, data_lens, item_lens
+
+
+    def get_k_continuous(self, layer_id, seq_len, page_indices):
+        lengths = torch.tensor([seq_len], device=page_indices.device, dtype=torch.int32)
+        key, _scale = self.get_k_and_scale(
+            layer_id, lengths, page_indices.reshape(1, -1), seq_len, seq_len
+        )
+        return key.reshape(seq_len, 1, self.pool.index_head_dim)
+
+    def get_k_scale_continuous(self, layer_id, seq_len, page_indices):
+        lengths = torch.tensor([seq_len], device=page_indices.device, dtype=torch.int32)
+        _key, scale = self.get_k_and_scale(
+            layer_id, lengths, page_indices.reshape(1, -1), seq_len, seq_len
+        )
+        return scale

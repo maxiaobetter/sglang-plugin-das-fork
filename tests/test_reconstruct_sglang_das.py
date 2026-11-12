@@ -1,0 +1,210 @@
+# Copyright (c) 2026 Hygon Information Technology Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+from tools.reconstruct_sglang_das import (
+    BOOTSTRAP_BEGIN,
+    LOADER_BEGIN,
+    MANIFEST_KIND,
+    MANIFEST_NAME,
+    ReconstructionError,
+    reconstruct_sglang_das,
+)
+
+
+def _run(*args: str, cwd: Path) -> None:
+    subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def _write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def _init_repo(path: Path) -> None:
+    _run("git", "init", "-q", cwd=path)
+    _run("git", "config", "user.email", "test@example.com", cwd=path)
+    _run("git", "config", "user.name", "Test", cwd=path)
+    _run("git", "add", ".", cwd=path)
+    _run("git", "commit", "-qm", "fixture", cwd=path)
+
+
+class ReconstructionTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.upstream = self.root / "upstream"
+        self.plugin = self.root / "plugin"
+        self.output = self.root / "output"
+        self.upstream.mkdir()
+        self.plugin.mkdir()
+
+        _write(
+            self.upstream / "python/sglang/srt/plugins/__init__.py",
+            """plugins = {}\n\ndef load_plugins():\n    plugins = {}\n    for name, (func, dist_name) in plugins.items():\n        func()\n""",
+        )
+        _write(
+            self.upstream / "python/sglang/__init__.py",
+            '"""SGLang public API."""\n\n'
+            "def _redirect_third_party_caches():\n"
+            "    pass\n\n"
+            "_redirect_third_party_caches()\n\n"
+            "VALUE = 1\n",
+        )
+        _write(
+            self.upstream / "python/pyproject.toml",
+            '[tool.setuptools.package-data]\n"sglang" = ["srt/**/*"]\n',
+        )
+        _write(self.upstream / "README.md", "upstream\n")
+        _init_repo(self.upstream)
+
+        _write(
+            self.plugin / "sglang_hcu_plugin/__init__.py",
+            "def register():\n    return None\n",
+        )
+        _write(
+            self.plugin / "sglang_hcu_plugin/compat/aiter.py",
+            "def bootstrap_aiter_compat():\n    return False\n",
+        )
+        _write(self.plugin / "sglang_hcu_plugin/jit_overlay/include/example.h", "x\n")
+        _write(self.plugin / "ignored.txt", "not vendored\n")
+        _write(self.plugin / "LICENSE", "license\n")
+        _write(self.plugin / "requirements-hcu.txt", "vendor-package\n")
+        _init_repo(self.plugin)
+
+    def test_current_hcu_namespace_executes_embedded_loader_and_preserves_native_data(self):
+        import runpy
+        import sys
+        from tools.verify_reconstruction import verify
+        old = self.plugin / "sglang_hcu_plugin"
+        old.rename(self.plugin / "hcu_sglang")
+        _write(self.plugin / "hcu_sglang/models/deepseek/current_v4/hcu_backend/csrc/kernel.cu", "native data\n")
+        resources = {
+            "mem_cache/cpp_utils/hash.cpp": "int value = 1;\n",
+            "mem_cache/rust_tree_core/crate/src/lib.rs": "pub fn value() {}\n",
+            "mem_cache/rust_tree_core/crate/.gitignore": "target/\n",
+            "models/deepseek/current_v4/execution/aiter_intree_configs/tuned.csv": "m,n\n1,1\n",
+            "layers/attention/linear/csrc/state.cu": "native state data\n",
+        }
+        for relative, content in resources.items():
+            _write(self.plugin / "hcu_sglang" / relative, content)
+        _run("git", "add", "-A", cwd=self.plugin)
+        _run("git", "commit", "-qm", "hcu namespace", cwd=self.plugin)
+        reconstruct_sglang_das(self.upstream, self.plugin, self.output)
+        self.assertEqual(verify(self.output)["status"], "passed")
+        manifest = json.loads((self.output / MANIFEST_NAME).read_text())
+        self.assertEqual(manifest["plugin"]["package"], "hcu_sglang")
+        self.assertFalse((self.output / "python/sglang_hcu_plugin").exists())
+        metadata = (self.output / "python/pyproject.toml").read_text()
+        self.assertIn('"models/deepseek/current_v4/hcu_backend/csrc/*"', metadata)
+        patterns = json.loads(metadata.split('"hcu_sglang" = ', 1)[1].splitlines()[0])
+        for relative, content in resources.items():
+            self.assertEqual((self.output / "python/hcu_sglang" / relative).read_text(), content)
+            package_root = self.output / "python/hcu_sglang"
+            self.assertTrue(any(package_root / relative in package_root.glob(pattern) for pattern in patterns), relative)
+        subprocess.run(
+            [sys.executable, "-c",
+             "import runpy,sys; from pathlib import Path; "
+             "loader=runpy.run_path(sys.argv[1]); loader['load_plugins'](); "
+             "assert Path(sys.modules['hcu_sglang'].__file__).resolve() == Path(sys.argv[2]).resolve()",
+             str(self.output / "python/sglang/srt/plugins/__init__.py"),
+             str(self.output / "python/hcu_sglang/__init__.py")],
+            cwd=self.root,
+            env={**os.environ, "PYTHONPATH": str(self.output / "python")},
+            check=True, capture_output=True, text=True,
+        )
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def test_reconstructs_repository_with_provenance(self) -> None:
+        result = reconstruct_sglang_das(self.upstream, self.plugin, self.output)
+
+        self.assertEqual(result.vendored_files, 3)
+        self.assertTrue((self.output / ".git").is_dir())
+        self.assertTrue((self.output / "python/sglang_hcu_plugin/__init__.py").is_file())
+        self.assertFalse((self.output / "python/ignored.txt").exists())
+        loader = (self.output / "python/sglang/srt/plugins/__init__.py").read_text()
+        package_init = (self.output / "python/sglang/__init__.py").read_text()
+        self.assertIn("register_embedded_hcu", loader)
+        self.assertIn("_bootstrap_hcu_aiter_compat", package_init)
+        self.assertNotIn(LOADER_BEGIN, loader)
+        self.assertNotIn(BOOTSTRAP_BEGIN, package_init)
+        self.assertEqual(package_init.count('"""SGLang public API."""'), 1)
+        self.assertTrue(package_init.startswith('"""SGLang public API."""'))
+        self.assertLess(
+            package_init.index("_redirect_third_party_caches()"),
+            package_init.index("from sglang_hcu_plugin.compat.aiter import"),
+        )
+        self.assertIn(
+            '"sglang_hcu_plugin"',
+            (self.output / "python/pyproject.toml").read_text(),
+        )
+
+        manifest = json.loads((self.output / MANIFEST_NAME).read_text())
+        self.assertEqual(manifest["kind"], MANIFEST_KIND)
+        self.assertEqual(manifest["vendored_file_count"], 3)
+        self.assertIn("python/sglang_hcu_plugin/__init__.py", manifest["files"])
+
+    def test_source_indexes_preserved_when_stat_cache_is_stale(self) -> None:
+        indexes = {}
+        for repo, relative in [(self.upstream, "README.md"),
+                               (self.plugin, "sglang_hcu_plugin/__init__.py")]:
+            index = repo / ".git/index"
+            indexes[index] = index.read_bytes()
+            source = repo / relative
+            stat = source.stat()
+            os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
+
+        reconstruct_sglang_das(self.upstream, self.plugin, self.output)
+
+        for index, before in indexes.items():
+            with self.subTest(repository=str(index.parent.parent)):
+                self.assertEqual(index.read_bytes(), before,
+                                 "read-only source checks must not refresh the Git index")
+
+    def test_existing_output_requires_force_and_valid_manifest(self) -> None:
+        self.output.mkdir()
+        with self.assertRaises(ReconstructionError):
+            reconstruct_sglang_das(self.upstream, self.plugin, self.output)
+        with self.assertRaises(ReconstructionError):
+            reconstruct_sglang_das(
+                self.upstream, self.plugin, self.output, force=True
+            )
+
+    def test_force_replaces_only_generated_output(self) -> None:
+        reconstruct_sglang_das(self.upstream, self.plugin, self.output)
+        marker = self.output / "stale"
+        marker.write_text("stale", encoding="utf-8")
+
+        reconstruct_sglang_das(
+            self.upstream, self.plugin, self.output, force=True
+        )
+        self.assertFalse(marker.exists())
+
+    def test_dirty_source_is_rejected(self) -> None:
+        _write(self.plugin / "untracked.py", "x = 1\n")
+        with self.assertRaisesRegex(ReconstructionError, "must be clean"):
+            reconstruct_sglang_das(self.upstream, self.plugin, self.output)
+
+    def test_loader_drift_is_rejected_atomically(self) -> None:
+        loader = self.upstream / "python/sglang/srt/plugins/__init__.py"
+        loader.write_text("def load_plugins():\n    pass\n", encoding="utf-8")
+        _run("git", "add", ".", cwd=self.upstream)
+        _run("git", "commit", "-qm", "drift", cwd=self.upstream)
+
+        with self.assertRaisesRegex(ReconstructionError, "injection anchor"):
+            reconstruct_sglang_das(self.upstream, self.plugin, self.output)
+        self.assertFalse(self.output.exists())
+
+
+if __name__ == "__main__":
+    unittest.main()
