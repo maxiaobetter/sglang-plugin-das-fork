@@ -2953,3 +2953,11 @@ Q norm、Q projection、indexer 和 absorbed BMM 保留。融合从固定 LightO
 [普通 index-K cache](../hcu_sglang/mem_cache/dsa_index_key_cache.py) 仅在新建的 HCU 原生 FP8 支持设备（当前检测范围为 gfx938）、FP8 scaled、非 LayerSplit、index-kpool 1、物理页和 index 页均 64、head 和量化块均 128、uint8 页缓冲合同下固定 linear 读写路径。聚合读取转发到固定官方 `GetKAndS.triton`；公开量化后写入复用同一官方 Triton kernel，并明确传入 `PRESHUFFLE_TILE=0`。setter 保留官方 FP8、FP32 scale、location 和连续性合同，不重新量化；其余 cache 继续调用现有 `execute`。不改变官方源码、adapter 全局 preshuffle 或主模型权重量化策略。
 
 当前证据覆盖 rank 0 实际 fused writer 的 K 和 scale、真实页传递，以及显式官方 reader 的同输入结果；新插件读写方法、实际公开 setter 分发、其余 rank、LayerSplit、不同外来缓存或跨进程 PD 布局、paged MQA、MTP、graph 换输入和 W4 实际调用仍待单独验证。捕获未证明 fused writer 的可选 weights 实参及 Q/scale 输出；不据此声明整个 indexer 或模型数学已对齐。新分配缓存合同不能用于解释来源不明的旧布局页。
+
+### 2026-11-13 取消运行时算子包固定哈希门禁
+
+以 plugin 源码快照 `02937ed24bc68ccbfadb21f534d1fca4fa891b43` 和已安装 wheel `a1772924` 的两份 loader 为基线，删除 `glm53_fp8_prefill_ops._runtime_abi` 与 `glm53_fp8_token_inverse._runtime_abi` 对已安装 LightOp 二进制的固定 SHA256 判断。token inverse 的重建扩展加载分支同时移除对历史 `base_lightop.binary_sha256` 值的固定判断；历史来源 JSON 保留原始内容。
+
+Python、Torch、HIP、DTK、CXX11 ABI、模型/张量合同，以及私有扩展自身二进制、源码、构建工具和来源清单的一致性检查继续执行。组件版本、实际文件哈希和调用链对齐仍须在运行证据中记录，取消固定包哈希不能代替算子语义与 ABI 核对。
+
+本轮只修改组件哈希门禁，执行 CI 对应的 Ruff 检查、Python 3.10 语法检查、差异空白检查和导览快照检查。未新增单测；GPU、Graph、完整服务、精度与性能不在本次验证范围。
