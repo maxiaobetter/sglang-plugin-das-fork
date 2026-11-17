@@ -540,6 +540,7 @@ def register_hooks():
     from hcu_sglang.layers.attention.current_dsa.glm53_decode_mla import (
         around_rocm_prepare,
     )
+    from hcu_sglang.layers.attention.current_dsa.dcp import around_mla_dcp_phase
 
     if envs.SGLANG_GLM_OPT_DECODE.get() or envs.SGLANG_GLM_LIGHTOP_FUSIONS.get():
         fusion_phases()
@@ -549,6 +550,10 @@ def register_hooks():
         "sglang.srt.models.deepseek_common.attention_forward_methods.forward_mla_rocm"
     )
     for target, hook in (
+        (
+            "sglang.srt.models.deepseek_common.attention_forward_methods.forward_mla.DeepseekMLAForwardMixin.is_dcp_mla_decode_phase",
+            around_mla_dcp_phase,
+        ),
         (
             "sglang.srt.models.deepseek_v2.DeepseekV2AttentionMLA.dispatch_attn_forward_method",
             around_attn_dispatch,

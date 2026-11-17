@@ -87,9 +87,8 @@ from sglang.srt.layers.attention.dsa_backend import (
     seqlens_expand_triton,
     should_use_dsa_fused_topk,
     torch,
-    transform_index_page_table_decode,
-    transform_index_page_table_prefill,
 )
+from sglang.kernels.ops.attention.fixup_zero_kv import fixup_zero_kv_rows
 from sglang.kernels.ops.attention.dsa.triton_kernel import get_valid_kv_indices
 from sglang.kernels.ops.quantization.fp8_kernel import fp8_dtype
 from hcu_sglang.layers.attention.current_dsa.dsa_topk_backend import DSATopKBackend, TopkTransformMethod
@@ -101,6 +100,8 @@ from hcu_sglang.layers.attention.current_dsa.flashmla_backend import DSAFlashMLA
 from hcu_sglang.layers.attention.current_dsa.forward_batch_utils import effective_forward_mode, get_flashmla_kv_valid_rows
 from hcu_sglang.layers.attention.current_dsa.dsa_backend_mtp_precompute import DeepseekSparseAttnBackendMTPPrecomputeMixin, PrecomputedMetadata, fill_decode_page_table_gpu
 from hcu_sglang.layers.attention.current_dsa.page_fusion import try_gather_repeat
+from hcu_sglang.layers.attention.current_dsa.dcp import _validate_dsa_dcp_launch
+from hcu_sglang.layers.attention.current_dsa.dcp_page_table import transform_index_page_table_decode, transform_index_page_table_prefill
 from hcu_sglang.layers.attention.current_dsa.dsa_metadata_manager import DSAMetadataManagementMixin
 from hcu_sglang.layers.attention.current_dsa.dsa_indexer_metadata import DSAIndexerMetadata
 from hcu_sglang.models.deepseek.current_v4.hcu_backend.hcu_cp_utils import cp_all_gather_rerange_output, cp_split_and_rebuild_position
@@ -441,11 +442,9 @@ class DeepseekSparseAttnBackend(
             == "gfx938"
         )
         self._hcu_draft_concat_shapes = set()
-        if model_runner.is_draft_worker:
-            self.dcp_size, self.dcp_rank = 1, 0
-        else:
-            self.dcp_size = get_parallel().attn_dcp_size
-            self.dcp_rank = get_parallel().attn_dcp_rank
+        self.dcp_enabled = get_parallel().dcp_enabled
+        self.dcp_size = get_parallel().attn_dcp_size if self.dcp_enabled else 1
+        self.dcp_rank = get_parallel().attn_dcp_rank if self.dcp_enabled else 0
         self.num_dcp_q_heads = self.num_q_heads * self.dcp_size
         self._dcp_page_table_cache = DcpPageTableCache()
         self.kv_cache_dim = model_runner.token_to_kv_pool.kv_cache_dim
@@ -485,6 +484,7 @@ class DeepseekSparseAttnBackend(
         )
         h16_requested = (
             _is_hcu
+            and not self.dcp_enabled
             and os.getenv("SGLANG_HCU_FLASHMLA_DECODE_H16", "0") == "1"
             and self.num_q_heads == 64
             and self.dsa_decode_impl == "flashmla_kv"
@@ -509,13 +509,13 @@ class DeepseekSparseAttnBackend(
                 "HCU FlashMLA decode H16 enabled for %s",
                 model_architectures[0],
             )
-        elif self.num_q_heads <= 64:
+        elif self.num_dcp_q_heads <= 64:
             self.flashmla_kv_num_q_heads = 64
-        elif self.num_q_heads <= 128:
+        elif self.num_dcp_q_heads <= 128:
             self.flashmla_kv_num_q_heads = 128
         else:
             # Keep original head count if it exceeds current padded variants.
-            self.flashmla_kv_num_q_heads = self.num_q_heads
+            self.flashmla_kv_num_q_heads = self.num_dcp_q_heads
         self.enable_auto_select_prefill_impl = self.dsa_prefill_impl == "flashmla_auto"
         self._sink_pad_cache: dict[tuple[int, int], torch.Tensor] = {}
         # Keep graph-captured buffers alive per stream.
@@ -596,6 +596,36 @@ class DeepseekSparseAttnBackend(
             self.device_capability = torch.cuda.get_device_capability()
         self.device_sm_major = self.device_capability[0]
         self.kv_cache_dtype = model_runner.kv_cache_dtype
+        parallel = get_parallel()
+        _validate_dsa_dcp_launch(
+            dcp_enabled=self.dcp_enabled,
+            dcp_size=self.dcp_size,
+            is_hcu_platform=_is_hcu,
+            device_capability=self.device_capability,
+            dsa_prefill_impl=self.dsa_prefill_impl,
+            dsa_decode_impl=self.dsa_decode_impl,
+            dsa_kv_cache_store_fp8=self.dsa_kv_cache_store_fp8,
+            page_size=self.physical_page_size,
+            enable_prefill_cp=model_runner.server_args.enable_prefill_cp,
+            enable_hisparse=model_runner.server_args.enable_hisparse,
+            enable_hierarchical_cache=model_runner.server_args.enable_hierarchical_cache,
+            enable_symm_mem=model_runner.server_args.enable_symm_mem,
+            speculative_algorithm=model_runner.server_args.speculative_algorithm,
+            fused_topk_enabled=envs.SGLANG_DSA_FUSE_TOPK.get(),
+            dcp_comm_backend=parallel.dcp_comm_backend,
+            speculative_num_steps=model_runner.server_args.speculative_num_steps,
+            speculative_eagle_topk=model_runner.server_args.speculative_eagle_topk,
+            speculative_num_draft_tokens=model_runner.server_args.speculative_num_draft_tokens,
+            pp_size=model_runner.server_args.pp_size,
+            attn_cp_size=parallel.attn_cp_size,
+            enable_dp_attention=model_runner.server_args.enable_dp_attention,
+            attn_tp_size=parallel.attn_tp_size,
+            dcp_group_ranks=tuple(parallel.dcp_group.ranks) if self.dcp_enabled else (),
+            attn_tp_group_ranks=tuple(parallel.attn_tp_group.ranks),
+            index_share_for_mtp_iteration=getattr(hf_config, "index_share_for_mtp_iteration", False),
+            decode_cuda_graph_backend=get_exec().graph.cuda_graph_config.decode.backend,
+            decode_cuda_graph_max_bs=get_exec().graph.cuda_graph_config.decode.max_bs,
+        )
 
         # Unsupported flashmla_sparse_q8 configs must fail at launch, not mid-forward.
         _validate_flashmla_sparse_q8_backend(
@@ -2391,6 +2421,8 @@ class DeepseekSparseAttnBackend(
                         or forward_mode.is_draft_extend_v2()
                     ),
                     cu_seqlens_q=metadata.cu_seqlens_q,
+                    dcp_size=self.dcp_size,
+                    dcp_rank=self.dcp_rank,
                 )
 
         # todo hisparse: to cover more backends
@@ -2609,6 +2641,7 @@ class DeepseekSparseAttnBackend(
                 page_table_1=page_table_1,
                 forward_batch=forward_batch,
                 attn_sink=attn_sink,
+                return_lse=self.dcp_enabled and not effective_forward_mode(forward_batch).is_idle(),
             )
         elif dsa_impl == "fa3":
             return self._forward_fa3(
@@ -2753,6 +2786,8 @@ class DeepseekSparseAttnBackend(
                 page_table=metadata.page_table_1,
                 topk_indices=topk_indices,
                 page_size=1,
+                dcp_size=self.dcp_size,
+                dcp_rank=self.dcp_rank,
             )
 
         if dsa_impl == "flashmla_sparse":
@@ -2792,6 +2827,7 @@ class DeepseekSparseAttnBackend(
                 page_table_1=page_table_1,
                 forward_batch=forward_batch,
                 attn_sink=attn_sink,
+                return_lse=self.dcp_enabled and not effective_forward_mode(forward_batch).is_idle(),
             )
         elif dsa_impl == "tilelang":
             # Cat-skip (HIP-only): when caller passes q_rope=None on HIP, q_all
@@ -3473,7 +3509,10 @@ class DeepseekSparseAttnBackend(
         page_table_1,
         forward_batch: ForwardBatch,
         attn_sink: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+        return_lse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if return_lse and attn_sink is not None:
+            raise NotImplementedError("DSA DCP does not support attention sinks")
         flash_mla_with_kvcache = get_flashmla_op(
             "flash_mla_with_kvcache", is_hcu=_is_hcu
         )
@@ -3537,6 +3576,9 @@ class DeepseekSparseAttnBackend(
 
         if needs_repad and num_valid == 0:
             o = q_input.new_zeros((0, 1, target_q_heads, v_head_dim))
+            lse = torch.empty(
+                (0, target_q_heads, 1), dtype=torch.float32, device=q_input.device
+            )
         else:
             attn_sink_kv = attn_sink
             if attn_sink_kv is not None and target_q_heads != num_q_heads:
@@ -3545,7 +3587,7 @@ class DeepseekSparseAttnBackend(
                 sink_padded = attn_sink_kv.new_zeros(target_q_heads)
                 sink_padded[:num_q_heads] = attn_sink_kv
                 attn_sink_kv = sink_padded
-            o, _ = flash_mla_with_kvcache(
+            o, lse = flash_mla_with_kvcache(
                 q=q_input,
                 k_cache=kv_cache,
                 cache_seqlens=cache_seqlens,
@@ -3570,9 +3612,28 @@ class DeepseekSparseAttnBackend(
             full_o = o.new_zeros((num_total, *o.shape[1:]))
             full_o[:num_valid] = o
             o = full_o
+            if return_lse:
+                full_lse = lse.new_zeros((num_total, *lse.shape[1:]))
+                full_lse[:num_valid] = lse
+                lse = full_lse
 
         if target_q_heads != num_q_heads:
             o = o[:, :, :num_q_heads, :].contiguous()
+            if return_lse:
+                lse = lse[:, :num_q_heads, :]
+
+        if return_lse:
+            o = o.squeeze(1).contiguous()
+            lse = lse.squeeze(-1).to(torch.float32).mul_(1.4426950408889634).contiguous()
+            local_kv_counts = (page_table_1 >= 0).sum(dim=-1, dtype=torch.int32)
+            fixup_zero_kv_rows(
+                o,
+                lse,
+                local_kv_counts,
+                self.get_device_int32_arange(page_table_1.shape[0] + 1),
+                max_seq_len=1,
+            )
+            return o, lse
 
         return o
 

@@ -18,6 +18,7 @@
 - [2026-11-14：GLM5.3 FP8 decode 调用核对](#2026-11-14-glm53-fp8-decode-调用核对)
 - [2026-11-16：GLM5.3 FP8 decode 两开关接入草稿](#2026-11-16-glm53-fp8-decode-两开关接入草稿)
 - [2026-11-16：GLM5.3 MTP 页表融合](#2026-11-16-glm53-mtp-页表-gather-repeat-融合)
+- [2026-11-16：GLM5.3 静态 LP 与 decode DCP 候选](#2026-11-16-glm53-静态-lp-与-decode-dcp-候选)
 - [附录：布局、操作方式与汇总](#附录布局操作方式与汇总)
 
 两份早期独立开发记录已全文收录。历史结果不代表当前代码已重新验证。
@@ -1499,6 +1500,45 @@ HMMT 128K 与 HumanEval 已在官方 SGLang 0.5.22 加已冻结 #27/#62 组合�
 plugin 回退验证只在独立诊断进程临时关闭模块的 `is_cuda`/`_is_hip` 分发条件以进入已有分离分支，硬件 `_is_hcu` 保持真实值，服务默认分发和运行环境未改。metadata receiver 按保存输入的 BS1 几何重建，实际方法、helper、物理页变换及 FlashMLA metadata API 保持生产实现；此项证明回退组件契约，不代替完整模型前向。证据为 `pagefusion-native-input-evidence-v3.json`、`pagefusion-candidate-inputs-v3-evidence.json`、`page-fusion-product-fallback-all8-evidence.json`、`pagefusion-native-postedit-v2-evidence.json` 与 `page-fusion-native-profile-review.json`。
 
 本次未修改 w_kc/w_vc BMM、shared 激活FP8融合、M16 tuning、算子安装包或部署并行策略。复验按照 [开发 Skill](../skills/hcu-plugin-dev/SKILL.md) 与 [开发指南](plugins.md) 固定实际基线、输入与消费边界，保留既有未提交工作。
+
+## 2026-11-16 GLM53 静态 LP 与 decode DCP 候选
+
+本轮只补静态 EPLB＋LPLB 和 HCU DSA DCP 的已确认接线差异。隔离副本来自部署快照 `130bcbf4568e36ed2add5fab2a8e057886d4d1a4`，原生对照为 `9dceb70511492a2ff62dfad841e2ec1f80c69428`。原生已有三份 inverse 清理改动未提交，本轮不修改它们。adapter 和算子包无需为这些接线变更修改；本轮修改归 plugin 所有。
+
+### 来源、调用与数学边界
+
+| 功能 | 实际调用链与本轮变更 | 源码状态 | 新配置运行证据 |
+|---|---|---|---|
+| 静态专家布局、冗余权重 | `init_expert_location` → metadata → `FusedMoE.weight_loader` → `logical_to_all_physical` → 每个本地副本；FP8 权重与 channel scale 使用相同物理专家顺序。现有加载器保留 | 已对齐，无需重写 | 未验证实际权重值 |
+| 静态 LPLB | `forward_deepep` → `TopK._post_process_topk_ids` → `topk_ids_logical_to_physical` → `cuda_solver.dispatch_probability` → HIP kernel。GLM DeepEP＋DeepGEMM 原先已有 compact fast path；本轮让通用入口也使用同一 solver 的 compact map，并在所有 HIP 分支的 padding 前完成映射；shared 列不参加概率分发 | 已对齐接线 | 新布局/概率、MTP、graph 未验证 |
+| DCP phase、Q heads | MLA 构造与 prepare → `all_gather_q_for_mla_decode` → `attn_mqa_for_dcp_decode`。HCU NextN 使用实际 DCP size；明确包含 draft extend v2；FlashMLA scheduler 使用 gather 后的 head 数 | 已对齐接线 | 全 rank collective、target/draft 未验证 |
+| DCP KV 写入 | `set_mla_kv_buffer` → plugin MLA write → LightOp `fused_quantize_and_store_mla_kv_cache`。使用 `global_loc % DCP == rank` 与 `global_loc // DCP`；保留 `fp8_e4m3`、epsilon `1e-6`、每 128 值 scale 与 BF16 RoPE；已解决的物理位置不再二次转换 | 已对齐接线 | 相同输入的量化 KV 字节/scale 未验证 |
+| DCP graph KV 写入 | 初始化时保留 allocator 外 padding，容量至少为 `max_bs × max_draft_tokens` 并按 page 对齐；capture 中把每个非 owner/无效行映射到不同 padding slot，避免动态 boolean compaction 与写冲突 | 已对齐接线 | 更换输入、页表后的 graph 重放未验证 |
+| DCP draft/index cache | 兼容框架的 widened draft 容量，HCU 主 KV 按 owner 写入；index-K 保持全局位置与 page 64；DCP 不省略 shared-TopK 层的 index-K 存储 | 已对齐接线 | 真实读取、缓存复用未验证 |
+| DCP 页表 | PAGED prefill/verify/draft extend 与 decode → `dcp_page_table` 的原生 Triton kernel。先按 TopK gather 全局位置，再做 owner 过滤/整除；不压紧条目，不移动 `-1`，保留原 TopK 顺序；DCP1 使用框架现有实现 | 已对齐接线 | expanded/padded 输入与 graph 未验证 |
+| DCP attention/LSE | `flash_mla_with_kvcache` → BF16 output/FP32 LSE → LSE 乘 `log2(e)` → `fixup_zero_kv_rows` → 框架现有 `cp_lse_ag_out_rs_mla`。head/行 padding 同时作用于 output/LSE；无本地 KV 时置 `O=0, LSE=-inf`；IDLE 保留 Tensor 返回契约 | 已对齐接线 | 同输入局部 attention、合并结果未验证 |
+
+DCP 页表与 launch validator 来自上述原生源码；不从 DAS fork 动态导入。沿用框架当前的 KVIndexTranslator/写位置标记、Q gather 和 ag_rs merge，不回退到旧框架的全套 planner。HCU LightOp MLA Q/cache 融合原本对 DCP 关闭，本轮保持这一条件；BW1000 的普通 ROCm core 已走显式接收 `(output, LSE)` 的 DCP 分支，不替换整个 core。
+
+### 配套与配置
+
+本轮核对基线为 LightOp `ab24fc73`＋当前 norm restoration patch（SO SHA256 `7a83185c37c7e77eebbe5ed200b06cb800900fa367afcc5291024945c2a42c05`）、DeepGEMM `81e6d30b5f87521019bb16c6da00ea8f6fb657f2`、FlashMLA `b832af3a41cd51835d65cd15a496fc484bfba76d`（SO SHA256 `be40c1edb34ca09177d86d01f94e0fd9880efbdc0f9f7175ae625e4b385101ad`），以及 nightly1104 BLAS＋配套 tuning/skinny。已有 DCP1 profile 不能代替本轮 DCP/静态 LP 的运行验证。
+
+- 静态 LP 通过 `--init-expert-location` 与 `SGLANG_EXPERIMENTAL_LPLB_STATIC_PROBS` 加载成对 artifact，使用 `--ep-dispatch-algorithm lp`；要求关闭 online EPLB。初始化保留 layout 精确比对、mass shape/有限非负检查和完整副本保留检查；每轮只做概率采样/分发，不增加在线 solver/all-reduce。
+- DCP 保留原生第一阶段约束：HCU BW1000，DCP2/4/8，prefill/decode 均为 `flashmla_kv`，FP8 KV、page 64、`ag_rs`；`SGLANG_DSA_FUSE_TOPK=false`。不与 prefill CP、HiSparse、HiCache 或 symmetric memory 组合。
+- EAGLE 要求 attention TP 与 DCP size/成员一致、PP1、attnCP1、DP attention、正的 speculative 参数，graph 只允许 disabled/full；full graph 要求正 max BS；不支持 index-share-for-MTP-iteration。新增 attention sink 的 DCP 数学不在本轮范围，运行时明确拒绝。
+- DCP 与静态 LP 不会由 `SGLANG_GLM_OPT_DECODE` 或 `SGLANG_GLM_HCU_GEMM` 自动启用；保留现有两个优化开关及其已有算子配置。
+- 未接入新 Triton w_kc/w_vc BMM、实验 shared 激活量化融合或 M16 新 tuning；不恢复 `broadcast_inverse`；HiSparse 留待原生验证后另行移植。
+
+### 验证状态
+
+10 个改动 Python 文件通过 Ruff 0.12.1 的 CI 规则 `E9/F63/F7/F82`（`--isolated --ignore-noqa`）、Python 3.10 语法解析与内存编译；L0 结构检查通过。五个页表函数与 launch validator 的去 docstring AST 与固定原生源码一致，三个新增 Hook 目标在当前官方源码中可解析；运行时绑定仍待验证。目录 diff 未发现空白错误，导览重建与快照检查随交付记录单独保存。依用户要求不新增单测、不运行完整测试套件。主对话正在用节点核对 MoE 路由差；本轮没有启动、停止或替换该服务。
+
+后续先补新配置的全 rank profile 和同输入算子对拍，包括实际安装库 ABI、冗余权重、TopK 概率映射、KV 字节/scale、零 owner 行、LSE、MTP、变化输入的 graph 重放。这些条目关闭后才能进入整模型精度和性能对比；本节仅交付候选源码接线，不能据此宣称 DCP/静态 LP 已完成运行验收。
+
+2026-11-17 运行兼容修正：原生静态 LP 已取得全部 8 rank 的实际 profile、5850 个算子调用快照，以及布局、概率、冗余权重、同输入 CPU 对拍、GPU 原位比较、最终 padding 屏蔽和更换输入 graph 的通过记录；早期采样异常的根因仍未确认，历史失败原样保留。候选在 target/draft 权重加载后，由 attention registry → `current_dsa.backend.DeepseekSparseAttnBackend.__init__` → DCP launch validator 参数读取失败，实际异常为 `server_args.cuda_graph_config is None`。组合框架将解析后的配置保存在 `get_exec().graph.cuda_graph_config`，已有 KV pool 和 graph 入口也读取该位置；原生 fork 的同名 ServerArgs 字段已填入解析配置。仅将 validator 的 backend/max BS 两处读取改为当前框架的运行时入口，不改变 graph 选择、DCP 限制或算子数学。CI 等价 lint、语法、文档门禁及重新运行的结果分别记录；候选静态 LP、DCP 和 HiSparse 验收仍保持未完成，未新增单测。
+
+同日第二处实际差异：候选调用的原生框架 JIT 文件只允许 CUDA tensor，且缺少负 ID 保留与空输入返回；完整模型在 LPLB dispatch 的 ROCm tensor 匹配处退出。plugin 已有 `jit_overlay/csrc/lplb/dispatch_probability.cuh` 与 `platform.cuh`，前者 SHA256 为 `d51ff4600dc7fb15663cb0486d9d46a87eaba9eb2b1d42a3dbb6e1fa991455d1`，与本轮原生参考相同，但全局 fork overlay 默认关闭，实际未被选中。新增窄 Hook 只替换 LPLB dispatch 的 JIT module factory，直接编译已打包的这两份源文件，保持全局 overlay 关闭和其他 JIT 输入不变。逆 CDF 的 FP32 概率、随机数生成和正 ID 输出保持原生算法；负 ID 与空输入沿原生合同。新增目标已纳入 Hook 合同；真实输入、空/负 ID、eager/变输入 graph 和全部 rank 服务验证仍待独立记录，不能将编译或导入成功记作通过。
 
 ## 附录：布局、操作方式与汇总
 
@@ -3113,3 +3153,9 @@ shared 的 profile 统计收窄到真实 MLP caller，排除同用 row-fusion wr
 本提交独立发布静态 EPLB/LPLB 的紧凑副本表分发、shared expert 排除、配置互斥和 HIP JIT factory 接入，来源为候选快照 `dd18168`。原生与候选的已绑定非在线 LP 配方均留有全部八 rank 的运行证据；候选 run09 完成三批共 24 个请求、5,850 次实际 LP 调用及冗余权重/scale、最终 padding 和 32 次空闲页账本检查。早期采样、NaN 及槽位差额失败保留原记录，根因未全部关闭。上述证据不代表整模型精度或正式性能通过。
 
 本次迁移在独立发布检出中执行 CI 对应 Ruff、Python 3.10 语法、导览快照与 diff 检查，不启动服务、不增加测试；后续功能的验证范围各自记录。
+
+## 2026-11-17 DCP 发布检查点
+
+本提交从 `dd18168` 单独发布 DCP 的 Q head gather、KV owner 写入与 graph padding、物理 index 页配置、TopK 页表过滤、FlashMLA output/LSE 和既有 ag_rs 合并接线。原生非 MTP 的 DCP2/4/8 已有全八 rank 采集；DCP2/4 的同输入独立回放分别在两侧通过 225/305 次检查，DCP4 含 80 次融合 index-K 检查。上述原生证据不作为候选完整服务通过结论。
+
+发布源码仍为有边界的候选：候选普通 prefill 分发曾出现 BF16 Q 与 FP32 w_kc 的 BMM 路径失败；新增原生 MTP index share 在 warmup 中存在共享 TopK 与 page table 行数不匹配。当前兼容代码继续明确拒绝未对齐的组合。用户新增要求的 FP8 index-K 虚拟页、MTP 索引共享及 HiSparse 1–6 draft token 支持由独立工作继续验证，未完成部分没有混入本次已形成的源码快照。
