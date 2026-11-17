@@ -3107,3 +3107,9 @@ shared 的 profile 统计收窄到真实 MLP caller，排除同用 row-fusion wr
 变更依据为原生 `48a89867` 的 8-rank eager/MTP/graph 调用记录和运行包 `ab24fc73` 加历史 norm 语义补丁。原路径为 `o_proj → try_o_proj_quant → per_token_quant_fp8(broadcast_inverse=True)`，改为同形状、dtype、布局的普通入口；保留每行 absmax/448 的 scale、全零行规则与 E4M3 输出。
 
 本次仅交付源码与 lint，不替换正在运行的 SO、不重启服务。改动后的完整 GPU/graph 调用链及模型精度、性能须在下一轮验证，既有 profile 作为修改前证据保留。
+
+## 2026-11-17 静态 LP 发布范围与运行核对
+
+本提交独立发布静态 EPLB/LPLB 的紧凑副本表分发、shared expert 排除、配置互斥和 HIP JIT factory 接入，来源为候选快照 `dd18168`。原生与候选的已绑定非在线 LP 配方均留有全部八 rank 的运行证据；候选 run09 完成三批共 24 个请求、5,850 次实际 LP 调用及冗余权重/scale、最终 padding 和 32 次空闲页账本检查。早期采样、NaN 及槽位差额失败保留原记录，根因未全部关闭。上述证据不代表整模型精度或正式性能通过。
+
+本次迁移在独立发布检出中执行 CI 对应 Ruff、Python 3.10 语法、导览快照与 diff 检查，不启动服务、不增加测试；后续功能的验证范围各自记录。

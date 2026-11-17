@@ -209,6 +209,11 @@ def around_dispatch_validation(original, server_args):
     if not is_hcu():
         return result
     cfg = P.resolving_view(server_args)
+    if envs.SGLANG_EXPERIMENTAL_LPLB_STATIC_PROBS.get():
+        if cfg.ep_dispatch_algorithm != "lp":
+            raise ValueError("Static LP probabilities require --ep-dispatch-algorithm lp")
+        if cfg.enable_eplb:
+            raise ValueError("Static LP probabilities require a fixed expert layout; disable online EPLB")
     if cfg.ep_dispatch_algorithm == "load_aware":
         if P.resolved_view(server_args).moe_a2a_backend == "none":
             raise ValueError("load_aware replica dispatch requires an a2a backend")
@@ -231,6 +236,12 @@ def register_hooks():
         return
     from sglang.srt.plugins.hook_registry import HookRegistry, HookType
     from hcu_sglang.eplb import expert_location_dispatch as D
+    from hcu_sglang.eplb.lplb_dispatch import around_dispatch_module
+    HookRegistry.register(
+        "sglang.kernels.ops.lplb.cuda_solver._dispatch_module",
+        around_dispatch_module,
+        HookType.AROUND,
+    )
     for target, implementation in [
         ("sglang.srt.model_executor.model_runner_components.moe_ep_setup.init_lplb_solvers", init_lplb_solvers),
         ("sglang.srt.model_executor.model_runner.ModelRunner.maybe_init_lplb_solvers", maybe_init_lplb_solvers),
