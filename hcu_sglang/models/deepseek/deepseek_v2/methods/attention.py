@@ -51,6 +51,26 @@ def __init__(
     is_nextn: bool = False,
 ) -> None:
     super(N0.DeepseekV2AttentionMLA, self).__init__()
+    from sglang.srt.configs.model_config import is_glm_moe_dsa
+    from sglang.srt.layers.attention.dsa.utils import is_dsa_enable_prefill_cp
+    from sglang.srt.layers.moe.utils import is_sbo_enabled
+
+    use_native_glm = C._is_hcu and is_glm_moe_dsa(config)
+    if use_native_glm:
+        allow_alt_stream = (
+            N0.envs.SGLANG_NPU_USE_MULTI_STREAM.get() or is_sbo_enabled()
+            if is_nextn
+            else (
+                N0.envs.SGLANG_ROCM_USE_MULTI_STREAM.get()
+                or N0.envs.SGLANG_NPU_USE_MULTI_STREAM.get()
+                or (
+                    is_dsa_enable_prefill_cp()
+                    and N0.get_parallel().attn_cp_size > 1
+                )
+            )
+        )
+        if not allow_alt_stream:
+            alt_stream = None
     self.layer_id = layer_id
     self.hidden_size = hidden_size
     self.qk_nope_head_dim = qk_nope_head_dim
@@ -214,6 +234,11 @@ def __init__(
             is_neox_style=is_neox_style,
             device=N0.get_device().device,
         )
+
+        if use_native_glm:
+            from hcu_sglang.layers.rotary import configure_glm_rope_cache
+
+            configure_glm_rope_cache(self.rotary_emb, config)
 
         if rope_scaling and rope_scaling.get("apply_yarn_scaling", True):
             self.scaling = N0.compute_mla_mscale_scaling(rope_scaling, self.scaling)
@@ -379,6 +404,7 @@ def forward_absorb_prepare(
     q_nope = None
     q_pe = None
     k_pe = None
+    kv_fusion = False
     fusion_plan: N1.Optional[N1.MlaBmmFusionPlan] = None
     if self.q_lora_rank is not None:
         q, latent_cache = (
@@ -390,18 +416,30 @@ def forward_absorb_prepare(
             )
         )
         k_nope = latent_cache[..., : self.kv_lora_rank]
+        if (
+            N0.envs.SGLANG_HCU_GLM53_FP8_KV_ROPE_STORE.get()
+            and not fuse_bmm_attention
+            and not q_replicate_active
+            and not N1._ENABLE_DSA_Q8KV8_BORN_FP8_Q
+            and llama_4_scaling is None
+        ):
+            from hcu_sglang.layers.attention.current_dsa.glm53_fp8_kv_producer import use_fused_kv_producer
+
+            kv_fusion = use_fused_kv_producer(self, forward_batch, positions, latent_cache)
 
         # overlap qk norm
         if self.alt_stream is not None and get_is_capture_mode():
             current_stream = N1.torch.cuda.current_stream()
             self.alt_stream.wait_stream(current_stream)
             q = self.q_a_layernorm(q)
-            with N1.torch.cuda.stream(self.alt_stream):
-                k_nope = self.kv_a_layernorm(k_nope)
+            if not kv_fusion:
+                with N1.torch.cuda.stream(self.alt_stream):
+                    k_nope = self.kv_a_layernorm(k_nope)
             current_stream.wait_stream(self.alt_stream)
         else:
             q = self.q_a_layernorm(q)
-            k_nope = self.kv_a_layernorm(k_nope)
+            if not kv_fusion:
+                k_nope = self.kv_a_layernorm(k_nope)
 
         # q_lora needed by indexer
         if self.use_dsa:
@@ -631,9 +669,18 @@ def forward_absorb_prepare(
         elif N1.is_kv_b_lora_active(self):
             q_nope_out = N1.apply_kv_b_lora_q_correction(self, q_nope, q_nope_out)
 
+    if kv_fusion:
+        from hcu_sglang.layers.attention.current_dsa.glm53_fp8_kv_producer import fuse_kv_rope_store
+
+        q_nope_out = fuse_kv_rope_store(
+            self, forward_batch, positions, q_nope_out, q_pe, latent_cache
+        )
+        q_pe, k_nope, k_pe = None, None, None
+
     fuse_rope_for_trtllm_mla = self._fuse_rope_for_trtllm_mla(forward_batch)
     if (
-        self.rotary_emb is not None
+        not kv_fusion
+        and self.rotary_emb is not None
         and not fuse_rope_for_trtllm_mla
         # Already applied at the q-prep/indexer overlap fork.
         and not self._q8kv8_qprep_overlap_pending
@@ -673,13 +720,14 @@ def forward_absorb_prepare(
             num_tokens, self.num_local_heads, self.kv_lora_rank, q_nope.device
         )
 
-    k_nope, k_pe = N1.prepare_kv_for_attention(
-        self,
-        forward_batch,
-        k_nope,
-        k_pe,
-        defer_materialization=fuse_rope_for_trtllm_mla,
-    )
+    if not kv_fusion:
+        k_nope, k_pe = N1.prepare_kv_for_attention(
+            self,
+            forward_batch,
+            k_nope,
+            k_pe,
+            defer_materialization=fuse_rope_for_trtllm_mla,
+        )
 
     # all_gather q_pe, q_nope_out,take tp8 as an example， q_pe [B, H, ROPE_DIM], q_nope_out [B, H, NOPE_DIM] gathered to [B, H * dcp_world_size, ROPE_DIM] [B, H * dcp_world_size, NOPE_DIM] for decode batch, and all gather k_pe, k_nope for extend batch.
     if self.dcp_size > 1:
@@ -743,6 +791,13 @@ def forward_absorb_core(
     attention_output_gate: N1.Optional[N1.torch.Tensor] = None,
 ):
     save_kv_cache = True
+    from hcu_sglang.layers.attention.current_dsa.glm53_fp8_kv_producer import PrefillQWithStoredKV
+
+    if isinstance(q_nope_out, PrefillQWithStoredKV):
+        query = q_nope_out.query
+        q_nope_out = query[..., : self.kv_lora_rank]
+        q_pe = query[..., self.kv_lora_rank :]
+        save_kv_cache = False
 
     if self.current_attention_backend in N1.FORWARD_ABSORB_CORE_ATTENTION_BACKENDS:
         extra_args = {}
@@ -793,6 +848,7 @@ def forward_absorb_core(
                 k_nope,
                 k_nope,
                 forward_batch,
+                save_kv_cache=save_kv_cache,
                 q_rope=q_pe,
                 k_rope=k_pe,
                 **extra_args,

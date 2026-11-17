@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+import math
 from typing import Any, Callable, Optional
 
 import torch
@@ -212,13 +213,31 @@ def around_compute_dsa_indexer_cell_size(
     num_layers: int,
     allocate_all_layers: bool = False,
 ) -> int:
-    if not _should_use_bf16_index_cache(kvc.kv_cache_dtype):
-        return original(
+    workspace_bytes = 0.0
+    use_bf16_index_cache = _should_use_bf16_index_cache(kvc.kv_cache_dtype)
+    if use_bf16_index_cache:
+        from sglang.srt.configs.model_config import get_dsa_index_head_dim
+        from hcu_sglang.mem_cache.dsa_index_cache_mode import (
+            IndexKCacheMode,
+            index_k_workspace_bytes_per_token,
+            resolve_index_k_cache_mode,
+        )
+
+        cache_mode = resolve_index_k_cache_mode(
+            kvc.kv_cache_dtype,
+            kvc.page_size,
+            get_dsa_index_head_dim(kvc.model_config.hf_config),
+        )
+        workspace_bytes = index_k_workspace_bytes_per_token(cache_mode)
+        use_bf16_index_cache = cache_mode is IndexKCacheMode.BF16
+    if not use_bf16_index_cache:
+        persistent_bytes = original(
             configurator,
             kvc=kvc,
             num_layers=num_layers,
             allocate_all_layers=allocate_all_layers,
         )
+        return math.ceil(persistent_bytes + workspace_bytes)
 
     from sglang.srt.configs.model_config import (
         dsa_layer_skips_topk,
@@ -329,6 +348,8 @@ def register_hooks() -> None:
         return
     from hcu_sglang.mem_cache import dsa_cache_layer_split
     dsa_cache_layer_split.register_hooks()
+    from hcu_sglang.mem_cache import dsa_layer_split_integration
+    dsa_layer_split_integration.register_hooks()
     from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
     _install_compat_members()

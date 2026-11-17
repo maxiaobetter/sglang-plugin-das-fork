@@ -13,6 +13,14 @@
 # ==============================================================================
 from __future__ import annotations
 import logging
+from typing import TYPE_CHECKING, List
+
+if TYPE_CHECKING:
+    from torch import nn
+    from sglang.srt.configs.model_config import ModelConfig
+    from sglang.srt.eplb.expert_location import ExpertLocationMetadata
+    from sglang.srt.eplb.expert_location_updater import ExpertLocationUpdater
+
 from sglang.srt.environ import envs
 from sglang.srt.eplb.expert_location import get_global_expert_location_metadata
 from sglang.srt.runtime_context import get_exec
@@ -232,4 +240,3 @@ def register_hooks():
         HookRegistry.register(target, _around(implementation), HookType.AROUND)
     HookRegistry.register("sglang.srt.eplb.expert_location_dispatch.ExpertLocationDispatchInfo.init_new", around_info_init, HookType.AROUND)
     HookRegistry.register("sglang.srt.server_args.ServerArgs.add_cli_args", after_cli, HookType.AFTER)
-    HookRegistry.register("sglang.srt.arg_groups.parallel_hook.handle_eplb_and_dispatch", around_dispatch_validation, HookType.AROUND)

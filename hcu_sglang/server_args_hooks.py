@@ -268,6 +268,8 @@ def _hcu_post_process(view):
         if cp_cache_layer_split_enabled():
             raise ValueError("--enable-cp-cache-layer-split requires the HCU plugin platform")
         return changes
+    from hcu_sglang.speculative_vp.config import validate as validate_draft_vp
+    validate_draft_vp(view)
     if cp_cache_layer_split_enabled():
         from hcu_sglang.mem_cache.cp_cache_layer_split.validation import validate_cp_cache_layer_split
         validate_cp_cache_layer_split(view, model_config_of(view).hf_config)
@@ -278,6 +280,10 @@ def _hcu_post_process(view):
 
 
 def _model_resolution(server_args, previous):
+    if is_hcu() and _resolving_view(server_args).enable_dsa_cache_layer_split:
+        from hcu_sglang.layer_split_pipeline import adapt_model_adjustments
+
+        previous = adapt_model_adjustments(previous)
     return handle_model_specific_adjustments(previous, server_args)
 
 

@@ -40,11 +40,7 @@ def register() -> None:
         triton_hcu,
     )
     from hcu_sglang.layers.attention import hcu_mla_registry
-    from hcu_sglang.layers.attention.fla import (
-        l2norm,
-        layernorm_gated,
-        linear_attention,
-    )
+    from hcu_sglang.layers.attention.fla import l2norm
     from hcu_sglang.layers.attention.linear import gdn_backend
     from hcu_sglang.layers import norm_activation, quantization, linear_fusion, layer_boundary, rotary
     from hcu_sglang.layers.moe import alignment, aiter_w4a8, lightop_runner, mega_moe, topk, standard_dispatcher
@@ -61,6 +57,7 @@ def register() -> None:
     from hcu_sglang.models import bailing_moe
     from hcu_sglang.models import dspark
     from hcu_sglang.models import hunyuan
+    from hcu_sglang.models import hunyuan_v4 as hunyuan_v4_hooks
     from hcu_sglang.models import glm4_moe
     from hcu_sglang.models import minimax_m2
     from hcu_sglang.models import utils as model_utils
@@ -100,8 +97,6 @@ def register() -> None:
     gdn_backend.register()
     from hcu_sglang.layers.attention.linear import kda_backend
     kda_backend.register_hooks()
-    linear_attention.register()
-    layernorm_gated.register()
     l2norm.register()
     from hcu_sglang.layers.moe import routing
     routing.register_hooks()
@@ -109,6 +104,8 @@ def register() -> None:
     load_aware_integration.register_hooks()
     from hcu_sglang.eplb import placement
     placement.register_hooks()
+    from hcu_sglang.eplb import hook_dispatch
+    hook_dispatch.register_hooks()
     from hcu_sglang.eplb import recording
     recording.register_hooks()
     from hcu_sglang import deepep_graph
@@ -124,6 +121,8 @@ def register() -> None:
     forward_batch.register_hooks()
     from hcu_sglang import prefill_output, prefill_graph_runner
     prefill_output.register_hooks()
+    from hcu_sglang import speculative_vp
+    speculative_vp.register_hooks()
     prefill_graph_runner.register_hooks()
     from hcu_sglang import prefill_graph_vote
     prefill_graph_vote.register_hooks()
@@ -188,6 +187,7 @@ def register() -> None:
     bailing_moe.register()
     dspark.register_hooks()
     hunyuan.register_hooks()
+    hunyuan_v4_hooks.register_hooks()
     glm4_moe.register_hooks()
     minimax_m2.register_hooks()
     multimodal_platform.register_hooks()

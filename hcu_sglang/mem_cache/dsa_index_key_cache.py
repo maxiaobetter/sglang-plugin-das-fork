@@ -11,13 +11,71 @@ import torch
 from sglang.kernels.ops.attention.dsa import index_buf_accessor
 from sglang.srt.constants import GPU_MEMORY_TYPE_KV_CACHE
 
+from hcu_sglang.mem_cache.dsa_index_cache_mode import IndexKCacheMode
+from hcu_sglang.utils.detection import is_hcu_native_fp8_supported
+
 if TYPE_CHECKING:
     from sglang.srt.mem_cache.memory_pool import DSATokenToKVPool
+
+
+def _set_linear_k_and_scale(buf, loc, index_k, index_k_scale):
+    loc = loc.to(torch.int64)
+    num_pages, buf_numel_per_page = buf.shape
+    del num_pages
+    (num_tokens_to_write,) = loc.shape
+    num_index_k, index_head_dim = index_k.shape
+    if index_k_scale.ndim == 1:
+        num_scales, scale_dim = index_k_scale.shape[0], 1
+    elif index_k_scale.ndim == 2:
+        num_scales, scale_dim = index_k_scale.shape
+    else:
+        raise ValueError(
+            f"index_k_scale must be 1D or 2D, got shape {index_k_scale.shape}"
+        )
+    assert buf_numel_per_page == 64 * (128 + 4)
+    assert num_tokens_to_write == num_index_k == num_scales
+    assert index_head_dim == 128
+    assert scale_dim == 1
+    assert buf.dtype == torch.uint8
+    assert loc.dtype == torch.int64
+    if index_buf_accessor._is_fp8_fnuz:
+        fp8_dtype = torch.float8_e4m3fnuz
+    else:
+        fp8_dtype = torch.float8_e4m3fn
+    assert index_k.dtype == fp8_dtype
+    assert index_k_scale.dtype == torch.float32
+    assert buf.is_contiguous()
+    assert loc.is_contiguous()
+    assert index_k.is_contiguous()
+    assert index_k_scale.is_contiguous()
+    index_buf_accessor._set_k_and_s_triton_kernel[(num_tokens_to_write,)](
+        buf.view(fp8_dtype),
+        buf.view(torch.float32),
+        loc,
+        index_k,
+        index_k_scale,
+        index_k.stride(0),
+        PAGE_SIZE=64,
+        BUF_NUMEL_PER_PAGE=buf_numel_per_page,
+        NUM_K_ELEMS_PER_TOKEN=index_head_dim,
+        S_OFFSET_NBYTES_IN_PAGE=64 * index_head_dim,
+        PRESHUFFLE_TILE=0,
+    )
 
 
 class IndexKeyCache:
     def __init__(self, pool: DSATokenToKVPool, index_buf_size: int):
         self.pool = pool
+        self._hcu_linear_fp8_index_cache = (
+            type(self) is IndexKeyCache
+            and is_hcu_native_fp8_supported()
+            and getattr(pool, "index_k_cache_mode", None) is IndexKCacheMode.FP8_SCALED
+            and not getattr(pool, "layer_shard_enabled", False)
+            and pool.page_size == getattr(pool, "index_page_size", None) == 64
+            and getattr(pool, "index_kpool", None) == 1
+            and pool.index_head_dim == pool.quant_block_size == 128
+            and pool.index_k_with_scale_buffer_dtype == torch.uint8
+        )
         num_pages = (index_buf_size + pool.page_size + 1) // pool.page_size
         with pool.memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE):
             with (
@@ -51,7 +109,9 @@ class IndexKeyCache:
         return buffer.view(-1, buffer.shape[1] // kernel_pages_per_row)
 
     def _layer_num_pages(self, layer_idx: int, num_pages: int) -> int:
-        return num_pages
+        layer_id = self.pool.indexer_layer_ids[layer_idx]
+        local_layer_idx = layer_id - self.pool.start_layer
+        return num_pages if self.pool._should_allocate_index_layer(local_layer_idx) else 0
 
     def clear(self) -> None:
         del self.buffer
@@ -111,7 +171,12 @@ class IndexKeyCache:
         max_seq_len: int,
     ):
         buf = self.get_buffer(layer_id)
-        return index_buf_accessor.GetKAndS.execute(
+        getter = (
+            index_buf_accessor.GetKAndS.triton
+            if self._hcu_linear_fp8_index_cache
+            else index_buf_accessor.GetKAndS.execute
+        )
+        return getter(
             self.pool,
             buf,
             page_indices=page_indices,
@@ -130,6 +195,9 @@ class IndexKeyCache:
         buf = self._kernel_view(
             self.buffer[self.pool._get_indexer_cache_index(layer_id)]
         )
+        if self._hcu_linear_fp8_index_cache:
+            _set_linear_k_and_scale(buf, loc, index_k, index_k_scale)
+            return
         index_buf_accessor.SetKAndS.execute(
             pool=self.pool,
             buf=buf,

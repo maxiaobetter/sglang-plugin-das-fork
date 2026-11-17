@@ -84,12 +84,20 @@ def scaled_fp8_quant(
             )
             if not input.is_contiguous():
                 input = input.contiguous()
-            output, scale = lightop_per_token_quant_fp8(
-                input,
-                dtype=output.dtype,
-                out_q=output,
-                out_scale=scale,
-            )
+            from sglang.srt.environ import envs
+
+            used_inverse = False
+            if envs.SGLANG_HCU_GLM53_FP8_TOKEN_INVERSE.get():
+                from hcu_sglang.layers.quantization.glm53_fp8_token_inverse import try_token_inverse
+
+                used_inverse = try_token_inverse(input, output, scale)
+            if not used_inverse:
+                output, scale = lightop_per_token_quant_fp8(
+                    input,
+                    dtype=output.dtype,
+                    out_q=output,
+                    out_scale=scale,
+                )
         else:
             scale = torch.zeros(1, device=input.device, dtype=torch.float32)
             _native_dynamic_per_tensor_quant_fp8(output, input, scale)
