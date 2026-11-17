@@ -14,6 +14,7 @@
 - [2026-11-01：分支迁移与八卡验证](#35-2026-11-01-rmsnormgemma-hcu-分支继续迁移)
 - [2026-11-02：DAS 分支逻辑对齐](#das-分支逻辑对齐2026-11-02)
 - [2026-11-11：GLM MQA 原生请求分组对齐](#2026-11-11-glm-mqa-原生请求分组对齐)
+- [2026-11-16：GLM5.3 MTP 页表融合](#2026-11-16-glm53-mtp-页表-gather-repeat-融合)
 - [附录：布局、操作方式与汇总](#附录布局操作方式与汇总)
 
 两份早期独立开发记录已全文收录。历史结果不代表当前代码已重新验证。
@@ -1472,6 +1473,29 @@ HMMT 128K 与 HumanEval 已在官方 SGLang 0.5.22 加已冻结 #27/#62 组合�
 
 
 结构化验证摘要保存于 `docs/glm5.3-mqa-validation-20261111.json`。HumanEval/145 的思考段反复宣布结束后继续推翻，存在重复长代码片段和说明段落，最终耗尽 100K 且 final 为空；HumanEval/116、140 也有反复讨论，但均正常结束并返回未通过测试的代码。HMMT 两个 128K 截断样本不因长度本身被判作固定文本循环。算子对拍、真实服务运行、基准分数和待核查项分别记录；这些结果不能证明精度差异由哪一项改动造成。
+
+## 2026-11-16 GLM5.3 MTP 页表 gather repeat 融合
+
+本次将历史 `_gather_repeat` 接入 `current_dsa/backend.py` 的 target verify 与 draft extend graph 页表分离回退分支，新实现文件为 `hcu_sglang/layers/attention/current_dsa/page_fusion.py`。现有 `can_fuse_dsa_metadata` 分发及三个 metadata 融合内核保持优先；默认 BS1 配置继续使用该完整融合，新增 helper 只替代满足条件的 gather、六次 repeat 与 copy。
+
+来源为历史 `glm53-dsa-page-fusion-performance-20261108/scripts/dsa_page_fusion.py`，SHA256 为 `dd67b29700ae1fd6231764f872406c67361cdcc81d8c247ea49d44d64c92b71d`，helper 逐字节保留。原生参考为 SGLang DAS `48a898676b0bdf485ca6c8a68eb8f01de1cd0654`；本次 adapter/plugin 部署快照起点为 `cc44ebc54946cec23d3d1fb5ddb91fc5edb6d148` 加保留的既有工作区修改，框架为 `baa9befa381511cd4d56f83980951e5a45fffc6d`。本提交只包含本次页表修改、本文记录及相应导览快照，不收录既有部署调试修改。
+
+调用链为 MTP graph runner → 当前 DSA metadata 分发 → guarded helper → `_transform_table_1_to_real` → indexer/MQA、TopK 页映射与 FlashMLA 消费端。适用条件为 HIP、kpool1、BS1–5、repeat6、全宽1048651，source/destination 均为连续 int32，indices 为同设备连续 int64，destination 为 `[BS*6,1048651]` 且与 source/indices 无 storage 别名。索引有效性来自请求池分配器，包含 graph padding row0；保留负索引 wrap，不承诺模拟非法索引异常。条件不满足时保留当前有效分离回退。helper 仅复制整数，随后只读变换物理页表，不改变浮点累加、量化或缓存布局。
+
+实际验证使用 TP8/attention DP8/EP8、每 DP BS1、112640 输入 tokens、MTP5/1/6、VP4、graph 上限4；三个输入轮次均只发送 BS1/110K。实际 source 为 `[49,1048651]`，destination 为 `[6,1048651]`。证据相对目录为 `${EVIDENCE_ROOT}/pool16-bs1-110k`，详细版本、组件 ABI/哈希、调用与输入输出证据见 `page-fusion-contract.json`、`mapped-components-comparison.json` 和逐 rank 记录。
+
+| 验证项 | 本次状态与边界 |
+|---|---|
+| 原生实际输入 | 全8 rank、verify/extend 两阶段各两份真实页表输入；helper 全宽及物理页消费者逐位一致，A→B→A graph 重放通过，输入未改写、destination 指针稳定、变输入确实改变输出 |
+| plugin 默认融合路径 | 全8 rank、verify/extend 两阶段实际页表 live prefix 与 live physical pages 对照通过，历史 helper 的 A→B→A graph 重放通过；所有32份样本碰巧全宽也相同，但不据此要求未使用尾部逐位一致 |
+| 修改后的实际分发 | 原生全8 rank、两组BS1/110K runtime graph 均确认 verify/extend 命中 `_gather_repeat`，修改后真实输入及变输入graph通过。plugin 在独立进程以保存的全8 rank输入运行实际 `_apply_cuda_graph_metadata`，受控进入分离回退，两阶段A→B→A graph与页表/物理页消费者逐位一致；未将其宣称为默认服务分发 |
+| 静态检查 | runtime 修改通过项目 CI 固定版本的 lint、Python3.10语法与 diff check；开发记录与导览另做 L0、结构/链接/锚点/元信息和快照检查，详见 `${EVIDENCE_ROOT}/pool16-bs1-110k/page-fusion-final-checks.json` |
+| 完整精度与性能 | 未验证；fake KV 页表诊断不代替整模型精度、真实P/D或完整性能结论 |
+
+
+plugin 回退验证只在独立诊断进程临时关闭模块的 `is_cuda`/`_is_hip` 分发条件以进入已有分离分支，硬件 `_is_hcu` 保持真实值，服务默认分发和运行环境未改。metadata receiver 按保存输入的 BS1 几何重建，实际方法、helper、物理页变换及 FlashMLA metadata API 保持生产实现；此项证明回退组件契约，不代替完整模型前向。证据为 `pagefusion-native-input-evidence-v3.json`、`pagefusion-candidate-inputs-v3-evidence.json`、`page-fusion-product-fallback-all8-evidence.json`、`pagefusion-native-postedit-v2-evidence.json` 与 `page-fusion-native-profile-review.json`。
+
+本次未修改 w_kc/w_vc BMM、shared 激活FP8融合、M16 tuning、算子安装包或部署并行策略。复验按照 [开发 Skill](../skills/hcu-plugin-dev/SKILL.md) 与 [开发指南](plugins.md) 固定实际基线、输入与消费边界，保留既有未提交工作。
 
 ## 附录：布局、操作方式与汇总
 

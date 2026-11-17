@@ -100,6 +100,7 @@ if _is_hcu:
 from hcu_sglang.layers.attention.current_dsa.flashmla_backend import DSAFlashMLAMetadata, can_fuse_flashmla_metadata, get_flashmla_op, refresh_flashmla_metadata, wrap_flashmla_metadata_result
 from hcu_sglang.layers.attention.current_dsa.forward_batch_utils import effective_forward_mode, get_flashmla_kv_valid_rows
 from hcu_sglang.layers.attention.current_dsa.dsa_backend_mtp_precompute import DeepseekSparseAttnBackendMTPPrecomputeMixin, PrecomputedMetadata, fill_decode_page_table_gpu
+from hcu_sglang.layers.attention.current_dsa.page_fusion import try_gather_repeat
 from hcu_sglang.layers.attention.current_dsa.dsa_metadata_manager import DSAMetadataManagementMixin
 from hcu_sglang.layers.attention.current_dsa.dsa_indexer_metadata import DSAIndexerMetadata
 from hcu_sglang.models.deepseek.current_v4.hcu_backend.hcu_cp_utils import cp_all_gather_rerange_output, cp_split_and_rebuild_position
@@ -1911,14 +1912,28 @@ class DeepseekSparseAttnBackend(
                 metadata.cu_seqlens_k[1:].copy_(
                     torch.cumsum(cache_seqlens, dim=0, dtype=torch.int32)
                 )
-                page_indices = self.req_to_token[req_pool_indices, :max_seqlen_k]
-                page_indices = torch.repeat_interleave(
-                    page_indices,
-                    repeats=self.speculative_num_draft_tokens,
-                    dim=0,
-                    output_size=bs * self.speculative_num_draft_tokens,
-                )
-                metadata.page_table_1[:, :max_seqlen_k].copy_(page_indices)
+                if (
+                    _is_hcu
+                    and self.dsa_index_kpool == 1
+                    and try_gather_repeat(
+                        self.req_to_token,
+                        req_pool_indices,
+                        metadata.page_table_1,
+                        bs,
+                        self.speculative_num_draft_tokens,
+                        max_seqlen_k,
+                    )
+                ):
+                    page_indices = metadata.page_table_1
+                else:
+                    page_indices = self.req_to_token[req_pool_indices, :max_seqlen_k]
+                    page_indices = torch.repeat_interleave(
+                        page_indices,
+                        repeats=self.speculative_num_draft_tokens,
+                        dim=0,
+                        output_size=bs * self.speculative_num_draft_tokens,
+                    )
+                    metadata.page_table_1[:, :max_seqlen_k].copy_(page_indices)
 
                 extend_seq_lens = self.decode_cuda_graph_metadata[
                     "target_verify_extend_seq_lens"
@@ -1992,11 +2007,25 @@ class DeepseekSparseAttnBackend(
                     torch.cumsum(cache_seqlens, dim=0, dtype=torch.int32)
                 )
 
-                page_indices = self.req_to_token[req_pool_indices, :max_seqlen_k]
-                page_indices = torch.repeat_interleave(
-                    page_indices, repeats=self.speculative_num_draft_tokens, dim=0
-                )
-                metadata.page_table_1[:, :max_seqlen_k].copy_(page_indices)
+                if (
+                    _is_hcu
+                    and self.dsa_index_kpool == 1
+                    and try_gather_repeat(
+                        self.req_to_token,
+                        req_pool_indices,
+                        metadata.page_table_1,
+                        bs,
+                        self.speculative_num_draft_tokens,
+                        max_seqlen_k,
+                    )
+                ):
+                    page_indices = metadata.page_table_1
+                else:
+                    page_indices = self.req_to_token[req_pool_indices, :max_seqlen_k]
+                    page_indices = torch.repeat_interleave(
+                        page_indices, repeats=self.speculative_num_draft_tokens, dim=0
+                    )
+                    metadata.page_table_1[:, :max_seqlen_k].copy_(page_indices)
 
                 seqlens_expanded = seqlens_expand_triton(
                     extend_seq_lens,
