@@ -84,7 +84,9 @@ def __init__(
     attn_tp_size = N0.get_parallel().attn_tp_size
     self.use_dsa = N0.is_deepseek_dsa(config)
     self.dcp_size = (
-        1 if (is_nextn and self.use_dsa) else N0.get_parallel().attn_dcp_size
+        1
+        if (is_nextn and self.use_dsa and not C._is_hcu)
+        else N0.get_parallel().attn_dcp_size
     )
     self.num_heads = num_heads
     assert num_heads % attn_tp_size == 0
