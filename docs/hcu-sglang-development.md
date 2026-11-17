@@ -3174,3 +3174,17 @@ MTP 边界：原生实际启动在 draft extend 中因 draft 池缺少 `full_to_
 本提交从 `dd18168` 单独发布 DCP 的 Q head gather、KV owner 写入与 graph padding、物理 index 页配置、TopK 页表过滤、FlashMLA output/LSE 和既有 ag_rs 合并接线。原生非 MTP 的 DCP2/4/8 已有全八 rank 采集；DCP2/4 的同输入独立回放分别在两侧通过 225/305 次检查，DCP4 含 80 次融合 index-K 检查。上述原生证据不作为候选完整服务通过结论。
 
 发布源码仍为有边界的候选：候选普通 prefill 分发曾出现 BF16 Q 与 FP32 w_kc 的 BMM 路径失败；新增原生 MTP index share 在 warmup 中存在共享 TopK 与 page table 行数不匹配。当前兼容代码继续明确拒绝未对齐的组合。用户新增要求的 FP8 index-K 虚拟页、MTP 索引共享及 HiSparse 1–6 draft token 支持由独立工作继续验证，未完成部分没有混入本次已形成的源码快照。
+
+## 2026-11-17 DCP FP8 index-K 物理页兼容候选
+
+用途与范围：沿用已固定的 adapter/plugin 组合和原生 `9dceb70511492a2ff62dfad841e2ec1f80c69428` 的隔离 FP8 虚拟页参考，只补齐已有 HCU 原生 FP8 index-K 路径的存储页兼容。模型权重量化、主 KV dtype、index-K 持久缓存 dtype 和当前 logits 计算 dtype 分别由原有配置与分发决定；本次不修改 W4A8 的 INT8 index-K 开关或 BF16 冷 prefill 策略。适用工作流为 `hcu-plugin-dev`，交付为隔离源码补丁、来源/调用对照与 lint 记录。
+
+调用链：框架 `DSATokenToKVPool` 构造经已有 `dsa_pool_methods.__init__` 和 `_create_index_key_cache` 到 `IndexKeyCache`；现有 HCU draft 构造已解析出物理 `index_page_size=64`。原生 getter 和 setter 使用物理 index 页。旧候选缓存类的行数、内部行宽、move 以及 CPU copy/load 仍按主 KV 的虚拟 `page_size` 组织，`_kernel_view` 的 reshape 不能修正这些操作对 K/scale 平面的解释。2026-11-17 接续复核还发现，候选 indexer 的两个 LightOp 融合量化写入点、FP8 paged MQA 输入 view 和 CP ragged 页宽检查仍用了虚拟 `page_size`；这些真实消费者也须同步对齐。
+
+最小修正：仅当现有基类缓存选择原生 FP8、`FP8_SCALED`、非 layer-shard、物理 index 页 64、`index_kpool=1`、head/quant block 为 128 且 packed buffer 为 uint8 时，把内部存储页宽统一为物理 index 页宽。每行保持 8,448 字节：先 64×128 个 FP8 K 字节，再 64×4 个 FP32 scale 字节。分配、kernel view、跨页 move、CPU copy/load 的页索引及 chunk 分组使用同一单位，状态传输 item 长度随真实行宽保持一致。indexer 的 `fuse_qk_quant_and_store_index_k_cache`、`fuse_act_quant_and_store_index_k_cache`、FP8 paged MQA view 和 CP ragged 检查均改用 `pool.index_page_size`，与固定原生来源一致。独立 quantized store/getter 继续调用已有线性 Triton API；融合写入仍调用原有 LightOp API，参数 epsilon、FP8 格式、Hadamard/head scale、舍入及 scale 应用位置保持原样。普通 page64 路径的页宽不变；INT8 开关、BF16 冷 prefill、压缩布局和 LayerSplit 的模式选择不变。
+
+例如 `index_buf_size=1024`、虚拟 KV 页 128 时，旧存储为 9×16,896 字节，kernel view 是 18 个物理页，但 move 按 128-token 的 K/scale 平面切片。原生使用 17×8,448 字节的物理 page64 存储；本候选与其统一。构造上层、KV owner 规则和 draft 所有权不在本次修改中，`dsa_pool_methods.py` 仅核对而未修改。
+
+部署上下文由用户于 2026-11-17 明确：此前 W4A8 的 PP2 prefill 未开启 MTP，无法向 decode 传 seed，关闭 MTP index share 用于避免第一步 eager 的性能损失；这项部署选择不能单独证明所有 DCP/MTP 组合的支持范围。FP8 prefill 使用 CP8/EP8，可开启 MTP；DCP 的 MTP index share 与 HiSparse 6-token MTP 由主对话处理，本补丁只负责 FP8 index-K 的物理页存储和对应读写参数。
+
+执行与检查：交付包含两个运行时文件的累积补丁，以及仅含本次 indexer 补漏的增量补丁；既有候选和验证记录另存修订快照。按用户要求只执行 CI 等价 lint、L0/导览检查、Python 3.10 语法及 `git diff --check`，最终命令和版本见独立验证记录。原生参考曾通过虚拟页 64/128/256/512 的各 42 次实际池/API eager 与变输入 graph 检查；DCP4 的全部八个处理 rank 已有 EXTEND/DECODE、graph、LightOp 实际输入、缓存字节、scale 及加载库哈希证据。这些均为历史原生前置证据，不记作本候选验证。候选同输入 GPU 对拍、跨物理页 K/scale 搬移、CPU 回存恢复，以及完整 DCP+MTP 实际输入与更换输入 graph 重放均待主对话统一调度；当前不能据此宣称 MTP、整模型精度或性能已通过。未新增单测，也未改共享候选、远端 prefix 或统一状态。

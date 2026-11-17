@@ -71,12 +71,15 @@ class IndexKeyCache:
             and is_hcu_native_fp8_supported()
             and getattr(pool, "index_k_cache_mode", None) is IndexKCacheMode.FP8_SCALED
             and not getattr(pool, "layer_shard_enabled", False)
-            and pool.page_size == getattr(pool, "index_page_size", None) == 64
+            and getattr(pool, "index_page_size", None) == 64
+            and pool.page_size % 64 == 0
             and getattr(pool, "index_kpool", None) == 1
             and pool.index_head_dim == pool.quant_block_size == 128
             and pool.index_k_with_scale_buffer_dtype == torch.uint8
         )
-        num_pages = (index_buf_size + pool.page_size + 1) // pool.page_size
+        num_pages = (
+            index_buf_size + self._storage_page_size + 1
+        ) // self._storage_page_size
         with pool.memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE):
             with (
                 torch.cuda.use_mem_pool(pool.custom_mem_pool)
@@ -92,11 +95,19 @@ class IndexKeyCache:
                     for i in range(pool.indexer_layer_num)
                 ]
 
+    @property
+    def _storage_page_size(self) -> int:
+        return (
+            self.pool.index_page_size
+            if getattr(self, "_hcu_linear_fp8_index_cache", False)
+            else self.pool.page_size
+        )
+
     def _buffer_shape(self, num_pages: int) -> tuple[int, int]:
         pool = self.pool
         return (
             num_pages,
-            pool.page_size
+            self._storage_page_size
             // pool.index_kpool
             * (pool.index_head_dim + pool.index_head_dim // pool.quant_block_size * 4),
         )
@@ -104,7 +115,7 @@ class IndexKeyCache:
     def _kernel_view(self, buffer: torch.Tensor) -> torch.Tensor:
         pool = self.pool
         kernel_pages_per_row = (
-            pool.page_size // pool.index_kpool // pool.index_page_size
+            self._storage_page_size // pool.index_kpool // pool.index_page_size
         )
         return buffer.view(-1, buffer.shape[1] // kernel_pages_per_row)
 
@@ -120,7 +131,7 @@ class IndexKeyCache:
         if tgt_loc.numel() == 0:
             return
 
-        page_size = self.pool.page_size
+        page_size = self._storage_page_size
         tgt_loc_flat = tgt_loc.view(-1).long()
         src_loc_flat = src_loc.view(-1).long()
         tgt_page = tgt_loc_flat // page_size
@@ -208,11 +219,11 @@ class IndexKeyCache:
 
     def cpu_copy(self, indices):
         # Retracted pages may be reused before resume, so offload index-K with KV.
-        page_indices = indices[:: self.pool.page_size] // self.pool.page_size
+        page_indices = indices[:: self._storage_page_size] // self._storage_page_size
         torch.cuda.synchronize()
         index_k_cpu = []
         chunk_size = self.pool.cpu_offloading_chunk_size
-        page_chunk_size = max(1, chunk_size // self.pool.page_size)
+        page_chunk_size = max(1, chunk_size // self._storage_page_size)
         for layer_id in range(self.pool.indexer_layer_num):
             index_k_cpu.append([])
             if self.buffer[layer_id].shape[0] == 0:
@@ -227,10 +238,10 @@ class IndexKeyCache:
         return index_k_cpu
 
     def load_cpu_copy(self, index_k_cpu, indices) -> None:
-        page_indices = indices[:: self.pool.page_size] // self.pool.page_size
+        page_indices = indices[:: self._storage_page_size] // self._storage_page_size
         torch.cuda.synchronize()
         chunk_size = self.pool.cpu_offloading_chunk_size
-        page_chunk_size = max(1, chunk_size // self.pool.page_size)
+        page_chunk_size = max(1, chunk_size // self._storage_page_size)
         for layer_id in range(self.pool.indexer_layer_num):
             if self.buffer[layer_id].shape[0] == 0:
                 continue

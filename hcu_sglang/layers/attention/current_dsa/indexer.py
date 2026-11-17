@@ -538,7 +538,7 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
             key,
             pool.get_index_k_with_scale_write_buffer(layer_id=layer_id),
             out_cache_loc.contiguous(),
-            pool.page_size,
+            pool.index_page_size,
             weights,
             hadamard_scale * self.softmax_scale,
             hadamard_scale,
@@ -1327,7 +1327,9 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
         kv_cache = self._get_index_k_read_buffer(pool, layer_id)
         assert len(kv_cache.shape) == 2
         return (
-            kv_cache.view(kv_cache.shape[0], pool.page_size, 1, self.head_dim + 4),
+            kv_cache.view(
+                kv_cache.shape[0], pool.index_page_size, 1, self.head_dim + 4
+            ),
             False,
         )
 
@@ -2304,7 +2306,7 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
             assert isinstance(get_token_to_kv_pool(), DSATokenToKVPool)
 
         pool = get_token_to_kv_pool()
-        page_size = pool.page_size
+        page_size = pool.index_page_size
         assert page_size == 64, "only support page size 64"
         assert len(weights.shape) == 3
         weights = weights.squeeze(-1)
@@ -2550,7 +2552,7 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
                 key,
                 write_buffer,
                 out_cache_loc.contiguous(),
-                pool.page_size,
+                pool.index_page_size,
                 1e-5,
                 False,
                 not _is_fp8_fnuz,
