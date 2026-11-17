@@ -44,6 +44,9 @@ def register_hooks() -> int:
 
 def around_decoder_init(original, self, *args, **kwargs):
     result = original(self, *args, **kwargs)
+    from hcu_sglang.layers.glm53_decode import mark_decoder
+
+    mark_decoder(self)
     from sglang.srt.environ import envs
 
     if envs.SGLANG_HCU_GLM53_FP8_ADD_RMS_ALIGN16.get():

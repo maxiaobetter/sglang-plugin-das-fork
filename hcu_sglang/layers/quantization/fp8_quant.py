@@ -86,8 +86,10 @@ def scaled_fp8_quant(
                 input = input.contiguous()
             from sglang.srt.environ import envs
 
-            used_inverse = False
-            if envs.SGLANG_HCU_GLM53_FP8_TOKEN_INVERSE.get():
+            from hcu_sglang.layers.glm53_decode import try_o_proj_quant
+
+            used_inverse = try_o_proj_quant(input, output, scale)
+            if not used_inverse and envs.SGLANG_HCU_GLM53_FP8_TOKEN_INVERSE.get():
                 from hcu_sglang.layers.quantization.glm53_fp8_token_inverse import try_token_inverse
 
                 used_inverse = try_token_inverse(input, output, scale)

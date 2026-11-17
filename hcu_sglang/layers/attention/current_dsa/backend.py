@@ -429,6 +429,18 @@ class DeepseekSparseAttnBackend(
         self.num_q_heads = (
             model_runner.model_config.num_attention_heads // get_parallel().attn_tp_size
         )
+        from hcu_sglang.layers.glm53_decode import model_matches
+
+        self._glm53_model = model_matches(model_runner.model_config.hf_config)
+        self._use_hcu_draft_concat = (
+            _is_hcu
+            and (envs.SGLANG_GLM_OPT_DECODE.get() or envs.SGLANG_HCU_DRAFT_CONCAT.get())
+            and self._glm53_model
+            and model_runner.is_draft_worker
+            and torch.cuda.get_device_properties(model_runner.device).gcnArchName.split(":")[0]
+            == "gfx938"
+        )
+        self._hcu_draft_concat_shapes = set()
         if model_runner.is_draft_worker:
             self.dcp_size, self.dcp_rank = 1, 0
         else:
@@ -876,6 +888,8 @@ class DeepseekSparseAttnBackend(
         metadata: DSAMetadata,
         seqlens_32_2d: torch.Tensor,
     ) -> None:
+        if _is_hcu and envs.SGLANG_HCU_GLM53_FP8_DECODE_NATIVE_OPS.get():
+            return
         new_schedule = resolve_paged_mqa_logits_metadata_fn()(
             seqlens_32_2d, 64, resolve_num_sms()
         )
@@ -1316,7 +1330,9 @@ class DeepseekSparseAttnBackend(
 
         paged_mqa_schedule_metadata = None
         paged_mqa_ctx_lens_2d = None
-        if is_cuda() and (
+        if is_cuda() and not (
+            _is_hcu and envs.SGLANG_HCU_GLM53_FP8_DECODE_NATIVE_OPS.get()
+        ) and (
             forward_mode.is_decode_or_idle()
             or forward_mode.is_target_verify()
             or forward_mode.is_draft_extend_v2()
@@ -1730,7 +1746,9 @@ class DeepseekSparseAttnBackend(
 
         paged_mqa_schedule_metadata = None
         paged_mqa_ctx_lens_2d = None
-        if is_cuda() and (
+        if is_cuda() and not (
+            _is_hcu and envs.SGLANG_HCU_GLM53_FP8_DECODE_NATIVE_OPS.get()
+        ) and (
             forward_mode.is_decode_or_idle()
             or forward_mode.is_target_verify()
             or forward_mode.is_draft_extend_v2()
@@ -2168,6 +2186,31 @@ class DeepseekSparseAttnBackend(
 
         self.forward_metadata = metadata
 
+    def _concat_mla_q(self, q_nope, q_rope, layer, forward_batch):
+        if self._use_hcu_draft_concat and layer.layer_id == 0:
+            mode = effective_forward_mode(forward_batch)
+            if mode in (ForwardMode.DECODE, ForwardMode.DRAFT_EXTEND_V2):
+                from hcu_sglang.layers.attention.current_dsa.concat_mla_hcu import (
+                    try_concat_mla_draft_hcu,
+                )
+
+                output = try_concat_mla_draft_hcu(
+                    q_nope,
+                    q_rope,
+                    batch_size=forward_batch.batch_size,
+                    is_draft_extend=mode == ForwardMode.DRAFT_EXTEND_V2,
+                )
+                if output is not None:
+                    signature = (mode, tuple(q_nope.shape), q_nope.stride())
+                    if signature not in self._hcu_draft_concat_shapes:
+                        logger.info(
+                            "HCU draft concat selected: mode=%s shape=%s stride=%s",
+                            *signature,
+                        )
+                        self._hcu_draft_concat_shapes.add(signature)
+                    return output
+        return concat_mla_absorb_q_general(q_nope, q_rope)
+
     def forward_extend(
         self,
         q: torch.Tensor,
@@ -2184,6 +2227,7 @@ class DeepseekSparseAttnBackend(
         is_neox: Optional[bool] = False,
         llama_4_scaling: Optional[torch.Tensor] = None,
         attn_sink: Optional[torch.Tensor] = None,
+        lightop_fused_q: bool = False,
     ) -> torch.Tensor:
 
         causal = not layer.is_cross_attention
@@ -2552,8 +2596,8 @@ class DeepseekSparseAttnBackend(
                 skip_softmax_threshold_scale_factor=envs.SGLANG_SKIP_SOFTMAX_PREFILL_THRESHOLD_SCALE_FACTOR.get(),
             )
         elif dsa_impl == "flashmla_kv":
-            if q_rope is not None:
-                q_all = concat_mla_absorb_q_general(q_nope, q_rope)
+            if not lightop_fused_q or q_all is None:
+                q_all = self._concat_mla_q(q_nope, q_rope, layer, forward_batch)
             return self._forward_flashmla_kv(
                 q_all=q_all,
                 kv_cache=kv_cache,
@@ -2620,6 +2664,7 @@ class DeepseekSparseAttnBackend(
         is_neox: Optional[bool] = False,
         llama_4_scaling: Optional[torch.Tensor] = None,
         attn_sink: Optional[torch.Tensor] = None,
+        lightop_fused_q: bool = False,
     ) -> torch.Tensor:
 
         causal = not layer.is_cross_attention
@@ -2734,8 +2779,8 @@ class DeepseekSparseAttnBackend(
                 skip_softmax_threshold_scale_factor=envs.SGLANG_SKIP_SOFTMAX_DECODE_THRESHOLD_SCALE_FACTOR.get(),
             )
         elif dsa_impl == "flashmla_kv":
-            if q_rope is not None:
-                q_all = concat_mla_absorb_q_general(q_nope, q_rope)
+            if not lightop_fused_q or q_all is None:
+                q_all = self._concat_mla_q(q_nope, q_rope, layer, forward_batch)
             return self._forward_flashmla_kv(
                 q_all=q_all,
                 kv_cache=kv_cache,

@@ -1960,7 +1960,7 @@ def _topk_ids_postprocess_torch(
     output_int64: bool = False,
 ):
     topk_ids = topk_ids_logical_to_physical(topk_ids, expert_location_dispatch_info)
-    if _is_hip and num_token_non_padded is not None:
+    if (_is_hip or _is_hcu) and num_token_non_padded is not None:
         # Keep the HIP fallback as plain torch ops inside this compiled region.
         # Calling _fill_padded_rows here would introduce a separate explicit
         # Triton launch after the logical-to-physical gather, while Inductor can
@@ -2670,7 +2670,7 @@ def _post_process_topk_ids(
                 if dispatch_algorithm == "load_aware"
                 else lplb_solver.solve(topk_ids)
             )
-    if _is_cuda:
+    if _is_cuda and not skip_deepep_padded_tokens:
         # LP path: solve LP outside torch.compile (the solver contains an
         # EP all-reduce that can't run inside compiled regions).
         if log2phy_prob is not None:
@@ -2701,7 +2701,7 @@ def _post_process_topk_ids(
                     else num_token_non_padded
                 ),
             )
-    elif _is_hip:
+    elif _is_hip or skip_deepep_padded_tokens:
         # On AMD HIP the aiter MoE kernels do not handle topk_ids=-1 safely
         # (negative indices cause illegal memory access). Keep their padded IDs
         # in range and zero their weights below. HCU DeepEP + DeepGEMM instead

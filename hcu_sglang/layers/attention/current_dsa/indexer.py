@@ -237,7 +237,7 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
         self.alt_stream = alt_stream
         self.hcu_arch_name: Optional[str] = None
         self.dsa_enable_prefill_cp = is_dsa_enable_prefill_cp()
-        if _is_cuda:
+        if _is_cuda and not _is_hcu:
             self.sm_count = resolve_num_sms()
             self.half_device_sm_count = ceil_align(self.sm_count // 2, 8)
             pp_size = get_parallel().pp_size
@@ -252,6 +252,7 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
                 else device_props.name
             )
             self.sm_count = device_props.multi_processor_count
+            self.half_device_sm_count = ceil_align(self.sm_count // 2, 8)
             pp_size = get_parallel().pp_size
             self.logits_with_pp_recv = (
                 pp_size > 1 and not get_parallel().pp_group.is_last_rank
@@ -1510,7 +1511,9 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
                 seqlens_32_2d = seqlens_32.reshape(-1).contiguous().view(-1, 1)
         else:
             seqlens_32_2d = seqlens_32.contiguous().view(-1, 1)
-        if _is_cuda:
+        if _is_cuda and not (
+            _is_hcu and envs.SGLANG_HCU_GLM53_FP8_DECODE_NATIVE_OPS.get()
+        ):
             if schedule_metadata is None:
                 schedule_metadata = resolve_paged_mqa_logits_metadata_fn()(
                     seqlens_32_2d, blocksize, self.sm_count

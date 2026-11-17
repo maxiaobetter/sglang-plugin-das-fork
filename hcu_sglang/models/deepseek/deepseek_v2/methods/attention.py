@@ -81,6 +81,14 @@ def __init__(
     self.kv_lora_rank = kv_lora_rank
     self.quant_config = quant_config
     self.is_nextn = is_nextn
+    from hcu_sglang.layers.glm53_decode import model_matches
+
+    self._lightop_glm_fusions = (
+        C._is_hcu
+        and model_matches(config)
+        and (N0.envs.SGLANG_GLM_OPT_DECODE.get() or N0.envs.SGLANG_GLM_LIGHTOP_FUSIONS.get())
+    )
+    self._hcu_glm_gemm = C._is_hcu and model_matches(config) and N0.envs.SGLANG_GLM_HCU_GEMM.get()
     attn_tp_size = N0.get_parallel().attn_tp_size
     self.use_dsa = N0.is_deepseek_dsa(config)
     self.dcp_size = (
@@ -335,6 +343,15 @@ def prepare_qkv_latent(
     input_quant_args: N0.Optional[N0.Tuple[N0.torch.Tensor, N0.torch.Tensor]] = None,
 ):
     assert self.q_lora_rank is not None
+    if (
+        self._lightop_glm_fusions
+        and N0.envs.SGLANG_LIGHTOP_NORM_QUANT.get()
+        and isinstance(hidden_states, tuple)
+        and len(hidden_states) == 3
+        and isinstance(hidden_states[2], N0.torch.Tensor)
+    ):
+        quant, scale, bf16 = hidden_states
+        return self.fused_qkv_a_proj_with_mqa((quant, scale, bf16.dtype))[0]
     if input_quant_args is not None:
         return self.fused_qkv_a_proj_with_mqa(
             hidden_states, input_quant_args=input_quant_args

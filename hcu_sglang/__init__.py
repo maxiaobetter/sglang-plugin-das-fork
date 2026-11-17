@@ -198,6 +198,8 @@ def register() -> None:
     qknorm_rope.register_hooks()
     wan_sla.register_hooks()
     register_deepseek()
+    from hcu_sglang.layers import glm53_decode
+    glm53_decode.register_hooks()
     model_utils.register_hooks()
     qwen2.register()
     qwen3.register()
