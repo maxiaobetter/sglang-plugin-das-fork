@@ -37,7 +37,6 @@ _HEADERS = {
     "reduce_hip.h": "db6e51131423c0f0f2e401b7ff2d991d70f788bbbe39e9ba8c1db07eaee1d5da",
 }
 _MODULE = {"activation": "activation_inverse_diag", "gather": "epgather_k8_diag"}
-_LIGHTOP_SHA256 = "f4d69b478289cf93a2be4c0f8f92c7374877609276bd6ba40476ab5a10abee6c"
 _ACTIVATION_ROWS = frozenset((14336, 84224, 84992))
 
 
@@ -76,10 +75,6 @@ def _runtime_abi():
     dtk = (root / ".info" / "rocm_version").read_text(encoding="utf-8").strip()
     if dtk.split("-", 1)[0].replace(".", "").replace(" ", "").replace("V", "") != "26041":
         raise RuntimeError(f"GLM-5.3 FP8 prefill extension requires DTK 26.04.1, found {dtk!r}")
-    from lightop import op
-
-    if _sha256(op.__file__) != _LIGHTOP_SHA256:
-        raise RuntimeError("GLM-5.3 FP8 prefill extension requires the fixed LightOp binary")
 
 
 @lru_cache(maxsize=4)

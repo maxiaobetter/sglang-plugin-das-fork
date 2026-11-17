@@ -29,7 +29,6 @@ _LOGGER = logging.getLogger(__name__)
 _CONFIG_SHA256 = "bc21bd68d92085465810c3da72c4b8a43b16c65c2c8f55f52547045f36c1abbf"
 _SOURCE_SHA256 = "27ae5b80c407ccdb21640948f505185ef6c558529e3c3938aa305bea2e2fbdfc"
 _REFERENCE_SHA256 = "e7870a15db717c3761e80725e238b8709ee1adb4ff92239121b7e4b8211f0361"
-_LIGHTOP_SHA256 = "f4d69b478289cf93a2be4c0f8f92c7374877609276bd6ba40476ab5a10abee6c"
 _MODULE = "token_inverse_diag"
 _FLAGS = [
     "-O3",
@@ -233,10 +232,6 @@ def _runtime_abi():
     dtk = (root / ".info" / "rocm_version").read_text(encoding="utf-8").strip()
     if dtk.split("-", 1)[0].replace(".", "").replace(" ", "").replace("V", "") != "26041":
         raise RuntimeError(f"GLM-5.3 FP8 token inverse requires DTK 26.04.1, found {dtk!r}")
-    from lightop import op
-
-    if _sha256(op.__file__) != _LIGHTOP_SHA256:
-        raise RuntimeError("GLM-5.3 FP8 token inverse requires the fixed LightOp binary")
 
 
 @lru_cache(maxsize=4)
@@ -263,7 +258,6 @@ def _load_extension(path):
             or source.get("reference_binary_sha256") != _REFERENCE_SHA256
             or source.get("module") != _MODULE
             or source.get("headers") != {}
-            or source.get("base_lightop", {}).get("binary_sha256") != _LIGHTOP_SHA256
             or manifest.get("source_manifest_sha256") != _sha256(provenance)
             or manifest.get("build_tool_sha256") != _sha256(builder)
             or manifest.get("hip_flags") != _FLAGS
