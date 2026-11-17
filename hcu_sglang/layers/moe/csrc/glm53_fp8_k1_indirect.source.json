@@ -13,5 +13,5 @@
     "Use a plugin-private C++ namespace and guard received row and expert bounds.",
     "Bind only the explicit indirect-A kernel and the plugin metadata producer via PyBind."
   ],
-  "metadata_delta": "Device counts are validated, writes are bounded by each expert's padded segment, and malformed counts or insufficient capacity raise after reading status on the eager stream. Nonlocal or invalid route IDs retain the -1 sentinel."
+  "metadata_delta": "Device counts are validated, writes are bounded by each expert's padded segment, and malformed counts or insufficient capacity trigger an asynchronous device assertion on the eager stream. Nonlocal or invalid route IDs retain the -1 sentinel."
 }

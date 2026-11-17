@@ -1,5 +1,6 @@
 #include <ATen/DeviceGuard.h>
 #include <ATen/MemoryOverlap.h>
+#include <ATen/ops/_assert_async.h>
 #include <torch/extension.h>
 
 #include <cstdint>
@@ -132,10 +133,8 @@ void metadata(const torch::Tensor& topk, const torch::Tensor& padded_counts,
                      expert_ends.data_ptr<int>(), row_src.data_ptr<int>(),
                      m_indices.data_ptr<int>(), output_index.data_ptr<int>(), route_count);
   TORCH_CHECK(hipGetLastError() == hipSuccess, "GLM-5.3 indirect K1 route mapping failed");
-  const int status = expert_ends.select(0, kExperts).item<int>();
-  TORCH_CHECK(status != 1, "GLM-5.3 indirect K1 padded counts must be nonnegative, "
-                          "multiples of 256, and sum to M");
-  TORCH_CHECK(status == 0, "GLM-5.3 indirect K1 local routes exceed the padded expert count");
+  at::_assert_async(expert_ends.select(0, kExperts).eq(0),
+                   "GLM-5.3 indirect K1 requires valid padded counts and route capacity");
 }
 
 torch::Tensor indirect(const torch::Tensor& input, const torch::Tensor& packed_weight,

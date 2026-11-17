@@ -2954,10 +2954,10 @@ Q norm、Q projection、indexer 和 absorbed BMM 保留。融合从固定 LightO
 
 当前证据覆盖 rank 0 实际 fused writer 的 K 和 scale、真实页传递，以及显式官方 reader 的同输入结果；新插件读写方法、实际公开 setter 分发、其余 rank、LayerSplit、不同外来缓存或跨进程 PD 布局、paged MQA、MTP、graph 换输入和 W4 实际调用仍待单独验证。捕获未证明 fused writer 的可选 weights 实参及 Q/scale 输出；不据此声明整个 indexer 或模型数学已对齐。新分配缓存合同不能用于解释来源不明的旧布局页。
 
-### 2026-11-13 取消运行时算子包固定哈希门禁
+### 2026-11-12 GLM5.3 FP8 MTP prefill router 分发候选
 
-以 plugin 源码快照 `02937ed24bc68ccbfadb21f534d1fca4fa891b43` 和已安装 wheel `a1772924` 的两份 loader 为基线，删除 `glm53_fp8_prefill_ops._runtime_abi` 与 `glm53_fp8_token_inverse._runtime_abi` 对已安装 LightOp 二进制的固定 SHA256 判断。token inverse 的重建扩展加载分支同时移除对历史 `base_lightop.binary_sha256` 值的固定判断；历史来源 JSON 保留原始内容。
+固定 official `baa9befa`、adapter wheel `20cc90b2` 和已安装 plugin wheel `a1772924`，先以安装清单逐项核对隔离源码的 842 个运行时文件。原生 prefill profile 按 `draft_extend` 父阶段拆分后，八个实际处理请求的 rank 各有 225 次 MAIN BF16 gate 和 3 次 MTP BF16 gate；当前 a177 的 MTP 各 3 次 gate 使用 FP32 logits。原生审计保留唯一 host-runtime/device correlation、trace SHA 与 worker 身份，MAIN/MTP 拆分不改变原始调用总数。
 
-Python、Torch、HIP、DTK、CXX11 ABI、模型/张量合同，以及私有扩展自身二进制、源码、构建工具和来源清单的一致性检查继续执行。组件版本、实际文件哈希和调用链对齐仍须在运行证据中记录，取消固定包哈希不能代替算子语义与 ABI 核对。
+差异入口是 [MoEGate](../hcu_sglang/layers/moe/deepseek_gate.py) 的 GLM5.3 FP8 资格判定：已有 BF16 CP 分支只接纳主模型 `layers.N.mlp.gate`，NextN 的 `decoder.mlp.gate` 未进入。候选仅补充 NextN 架构与该 prefix 的配对，复用现有固定模型、CT channel FP8 配置、硬件及普通 eager EXTEND/CP 保护。主模型层号检查和 forward 数学实现保持原逻辑。
 
-本轮只修改组件哈希门禁，执行 CI 对应的 Ruff 检查、Python 3.10 语法检查、差异空白检查和导览快照检查。未新增单测；GPU、Graph、完整服务、精度与性能不在本次验证范围。
+此记录时尚未部署候选。现场 MTP gate 输入、运行时权重和校正 bias、logits 及 EP TopK 正在取样；同输入原生/当前/候选数值、量化中间量、实际 Hook 分发与新服务 profile 均待验证。profile 中 BF16/FP32 的分歧不能代替专家选集影响或完整 prefill/MTP 精度结论。Decode 按用户要求暂停，graph 更换输入重放未执行；未新增单测。

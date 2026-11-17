@@ -1967,9 +1967,19 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
             _is_hcu
             and envs.SGLANG_DSA_MQA_SPLIT_BY_SEQ.get()
             and self.hcu_glm_dsa_bf16_head_gates
-            and self._use_hcu_int8_index_cache(pool)
-            and use_bf16_index_cache
-            and q_fp8.dtype == kv_bf16.dtype == torch.bfloat16
+            and (
+                (
+                    self._use_hcu_int8_index_cache(pool)
+                    and use_bf16_index_cache
+                    and q_fp8.dtype == kv_bf16.dtype == torch.bfloat16
+                )
+                or (
+                    not use_bf16_index_cache
+                    and getattr(pool, "index_k_cache_mode", None)
+                    is IndexKCacheMode.FP8_SCALED
+                    and q_fp8.dtype == k_fp8.dtype == torch.float8_e4m3fn
+                )
+            )
             and metadata.topk_transform_method == TopkTransformMethod.RAGGED
             and metadata.topk_backend.is_sgl_kernel()
             and not metadata.topk_backend.should_use_topk_v2()
@@ -2006,6 +2016,7 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
                         ks,
                         ke,
                         kv_scale=scale,
+                        clean_logit=not align_mqa_requests,
                     )
                 elif _is_hip:
                     from aiter.ops.triton.fp8_mqa_logits import fp8_mqa_logits
@@ -2086,13 +2097,19 @@ class Indexer(DSANPUIndexerMixin, BaseFusedOp):
                     )
                 elif _is_hcu:
                     kv, scale = kv_fp8
+                    if group_slices:
+                        kv = kv[k_start:k_end]
+                        scale = scale[k_start:k_end]
+                        if scale.data_ptr() % 16:
+                            scale = scale.clone()
                     logits_chunk = _hcu_mqa_logits(
                         q_fp8[start:end],
                         kv,
                         weights[start:end],
-                        ks[start:end],
-                        ke[start:end],
+                        chunk_ks,
+                        chunk_ke,
                         kv_scale=scale,
+                        clean_logit=not align_mqa_requests,
                     )
                 elif _is_hip:
                     from aiter.ops.triton.fp8_mqa_logits import fp8_mqa_logits
