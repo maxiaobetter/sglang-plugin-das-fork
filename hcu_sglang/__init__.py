@@ -34,6 +34,7 @@ def register() -> None:
         dsa_kernels,
         dsa_topk,
         current_dsa,
+        hisparse,
         dsv4_compressor,
         flashattention_backend,
         index_topk_share,
@@ -91,6 +92,7 @@ def register() -> None:
     dsa_kernels.register_hooks()
     dsa_topk.register_hooks()
     current_dsa.register_hooks()
+    hisparse.register_hooks()
     dsv4_compressor.register_hooks()
     index_topk_share.register_hooks()
     triton_hcu.register_hooks()

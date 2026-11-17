@@ -172,6 +172,11 @@ def around_write_mla_kv_buffer(
     if pool.store_dtype != pool.dtype:
         cache_k_nope = cache_k_nope.view(pool.store_dtype)
         cache_k_rope = cache_k_rope.view(pool.store_dtype)
+    if hasattr(pool, "full_to_hisparse_device_index_mapping"):
+        from hcu_sglang.layers.attention.hisparse import enabled as hisparse_enabled
+
+        if hisparse_enabled():
+            loc = loc.clamp_min(0)
     _write_triton(dst_buffer, loc, cache_k_nope, cache_k_rope)
     return None
 

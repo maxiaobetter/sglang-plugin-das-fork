@@ -19,6 +19,7 @@
 - [2026-11-16：GLM5.3 FP8 decode 两开关接入草稿](#2026-11-16-glm53-fp8-decode-两开关接入草稿)
 - [2026-11-16：GLM5.3 MTP 页表融合](#2026-11-16-glm53-mtp-页表-gather-repeat-融合)
 - [2026-11-16：GLM5.3 静态 LP 与 decode DCP 候选](#2026-11-16-glm53-静态-lp-与-decode-dcp-候选)
+- [2026-11-17：GLM5.3 FP8 HiSparse 原生调用对齐](#2026-11-17-glm53-fp8-hisparse-原生调用对齐)
 - [附录：布局、操作方式与汇总](#附录布局操作方式与汇总)
 
 两份早期独立开发记录已全文收录。历史结果不代表当前代码已重新验证。
@@ -3147,6 +3148,20 @@ shared 的 profile 统计收窄到真实 MLP caller，排除同用 row-fusion wr
 变更依据为原生 `48a89867` 的 8-rank eager/MTP/graph 调用记录和运行包 `ab24fc73` 加历史 norm 语义补丁。原路径为 `o_proj → try_o_proj_quant → per_token_quant_fp8(broadcast_inverse=True)`，改为同形状、dtype、布局的普通入口；保留每行 absmax/448 的 scale、全零行规则与 E4M3 输出。
 
 本次仅交付源码与 lint，不替换正在运行的 SO、不重启服务。改动后的完整 GPU/graph 调用链及模型精度、性能须在下一轮验证，既有 profile 作为修改前证据保留。
+
+## 2026-11-17 GLM5.3 FP8 HiSparse 原生调用对齐
+
+用途与范围：沿用部署快照 `130bcbf4568e36ed2add5fab2a8e057886d4d1a4` 和原生 `9dceb70511492a2ff62dfad841e2ec1f80c69428` 的实际安装环境，仅为 HCU GLM DSA、FP8 KV、HiSparse 接入窄兼容入口。准入还核对本轮 GLM5.3 的 78 层、hidden 6144、64 attention heads、KV rank 512、NoPE/RoPE 192/64、topK 2048 与 256 routed / 1 shared / 8 selected expert 配置，以及 compressed-tensors 的静态 channel-FP8 权重、动态 token-FP8 激活和对称无分组方案。同架构的 BF16、W4 和其他配置继续走框架原有校验，不继承本轮支持声明。适用工作流为 `hcu-plugin-dev`；输入是已绑定源码、库身份和全部处理 rank 的原生 profile 与真实算子张量，交付为分发兼容和同输入对拍证据，不包含整模型精度或性能结论。
+
+原生隔离参考修正了 raw KV 写入的驻留位置条件、HIP wave64 ballot 和 host pinned 指针到 GPU alias 的转换。原始工作区的三份 dirty 文件保留；算子包、FP8 量化和累加策略没有更换。原生 MTP-off eager 与 full graph 均完成三批各八个 8192-token 请求，完整 profile 与实际 worker/库绑定覆盖全部八 rank；独立 swap 40 次、eager 来源 attention 80 次和 full-graph 来源 attention 80 次回放逐位一致，均包含更换输入后的 graph 重放。
+
+收紧准入后的候选快照已完成同一 MTP-off 配方的完整 eager 和 full graph 服务。两种执行各完成 24 个请求，每个生成 16 token；各有 8 份完整 profile 与实际处理 worker 的源码、库路径和哈希。eager 的 192 次 raw KV、48 次完整 LRU swap、48 次计划复制与 192 份 attention 快照全部通过；full graph 的 216 次 raw KV、72 次完整 LRU swap、72 次计划复制与 216 份 attention 快照全部通过，覆盖 72 次 graph 快照前向。计划复制分别核对 48,288 和 47,649 个有效 token 的字节。原生实现再对候选 eager、graph 的全部八 rank 实际 prefill/decode 输入各回放 80 次，包含 A/B/A 更换输入的 graph 重放，输出均逐位一致。这些结论仅覆盖已绑定 GLM5.3 配置与上述非 MTP 配方。
+
+最小修改：[HiSparse 兼容入口](../hcu_sglang/layers/attention/hisparse.py) 将上述模型的 backend 解析和验证限定为双方 TileLang，使用已有 packaged HiSparse CXX 的专用 JIT factory，保持全局 JIT overlay 默认关闭。CXX 仅补 HIP wave64 ballot 与 shuffle 调用；host alias 沿用其已有 runtime helper。[MLA raw 写入](../hcu_sglang/mem_cache/mla.py) 将负 padding 位置映射到已有保留槽 0，使正驻留位置才可写；继续直接将 512 NoPE 和 64 RoPE 转成 E4M3FN，保留 576 字节布局，不进入 656 字节 scaled FlashMLA 写入。TileLang 使用原生 gfx938 的 block-I 64、256 线程和 CU 调度常量 304，复用原有 FP32 累加、FP8 softmax score、BF16 partial output 与 combine，不全局切换平台标志。
+
+MTP 边界：原生实际启动在 draft extend 中因 draft 池缺少 `full_to_hisparse_device_index_mapping` 退出，未进入真实 verify 请求。当前上游 spec swap 还限制 2–4 draft token，与本轮既有 6-token 配置不同；本候选明确拒绝该 HCU HiSparse speculative 组合，不自动改变 MTP 步数，也不将其标为已支持。DCP 与 HiSparse 组合沿用第一阶段不支持边界；radix cache、mixed chunk 和其他原生通用约束仍由框架校验。
+
+执行与检查：最终快照的真实配置解析已通过双 TileLang 默认、混合布局拒绝、MTP 拒绝、原有 radix 约束、未启用 HiSparse 回退和 BF16 配置原有校验六项检查。最终运行时代码的独立回放包括原生全部八 rank 实际输入的 40 次 swap、80 次 attention、80 次 raw KV 写入，另三次 raw KV 的 0/-1 位置边界检查；均覆盖 eager 和变输入 graph。完整候选服务、CPU 快照复核、实际源码与库绑定分别保存为独立证据，早期失败尝试保留原状态。CI 等价 Ruff 0.12.1、L0、导览、Python 3.10 语法和 diff 检查结果以本轮独立验证记录为准；未新增单测、提交或推送。HiSparse 的 MTP 组合和模型精度、性能仍在本轮通过范围之外。
 
 ## 2026-11-17 静态 LP 发布范围与运行核对
 
