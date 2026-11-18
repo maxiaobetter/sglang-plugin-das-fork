@@ -563,6 +563,8 @@ def fused_experts_impl_w4a8_triton(
     routed_scaling_factor: float,
     num_local_tokens: Optional[torch.Tensor] = None,
     shared_output: Optional[torch.Tensor] = None,
+    situ_beta: float = 1.0,
+    situ_linear_beta: Optional[float] = None,
 ) -> torch.Tensor:
     """Run SlimQuant W4A8 Triton MoE GEMMs without Marlin repack."""
     assert hidden_states.ndim == 2 and hidden_states.is_contiguous()
@@ -663,6 +665,17 @@ def fused_experts_impl_w4a8_triton(
             activated = F.silu(gate) * up
         elif activation == "gelu":
             activated = F.gelu(gate) * up
+        elif activation == "situ":
+            # Kimi K3 SituGLU, matching upstream SituAndMul.forward_native:
+            # gate = beta*tanh(gate/beta)*sigmoid(gate); up is softly clipped
+            # by linear_beta when set. fp32 compute, cast back like the
+            # fused op does.
+            gate_f = gate.float()
+            up_f = up.float()
+            gated = situ_beta * torch.tanh(gate_f / situ_beta) * torch.sigmoid(gate_f)
+            if situ_linear_beta is not None:
+                up_f = situ_linear_beta * torch.tanh(up_f / situ_linear_beta)
+            activated = (gated * up_f).to(gate.dtype)
         else:
             raise ValueError(f"Unsupported FusedMoE activation: {activation}")
 
@@ -700,6 +713,8 @@ def fused_experts_impl_w4a8_triton(
 
     return output
 
+
+HY4_CT_W4A8_FORMAT = "hy4_compressed_tensors_w4a8"
 
 _QWEN4_EXP_ARCHS = (
     "Qwen4ExpForConditionalGeneration",
@@ -772,6 +787,8 @@ class SlimQuantW4A8Int8MarlinConfig(QuantizationConfig):
         w8a8_include: Optional[list[str]] = None,
         packed_modules_mapping: Optional[Dict[str, List[str]]] = None,
         compressed_tensors_packed: bool = False,
+        checkpoint_format: Optional[str] = None,
+        linear_targets: Optional[list[str]] = None,
     ):
         super().__init__()
         self.ignore = ignore
@@ -783,6 +800,8 @@ class SlimQuantW4A8Int8MarlinConfig(QuantizationConfig):
         self.w8a8_include = list(w8a8_include or [])
         self.packed_modules_mapping = packed_modules_mapping or {}
         self.compressed_tensors_packed = compressed_tensors_packed
+        self.checkpoint_format = checkpoint_format
+        self.linear_targets = linear_targets
 
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
@@ -806,40 +825,80 @@ class SlimQuantW4A8Int8MarlinConfig(QuantizationConfig):
         experts_only_linear = any(arch in _QWEN4_EXP_ARCHS for arch in archs)
         mixed = config.get("mixed_precision") or {}
         w8a8 = mixed.get("w8a8_include") or {}
+        checkpoint_format = config.get("checkpoint_format")
+        linear_targets = None
+        is_hyv4 = any(arch.startswith("HYV4") for arch in archs)
+        has_int8_group = any(
+            (group.get("weights") or {}).get("num_bits") == 8
+            for group in (config.get("config_groups") or {}).values()
+        )
+        if config.get("quant_method") == "compressed-tensors" and (
+            is_hyv4 or has_int8_group
+        ):
+            if not cls._supports_compressed_config(config):
+                raise ValueError("Unsupported compressed-tensors W4A8 scheme")
+            if not is_hyv4:
+                raise ValueError(
+                    "Mixed INT4/INT8 compressed-tensors slimquant_w4a8_marlin "
+                    "requires an HYV4 architecture, got %r" % (archs,)
+                )
+            checkpoint_format = HY4_CT_W4A8_FORMAT
+            linear_targets = [
+                target
+                for group in config["config_groups"].values()
+                if group["weights"]["num_bits"] == 8
+                for target in group["targets"]
+            ]
         return cls(
             ignore=config.get("ignore"),
             experts_only_linear=experts_only_linear,
             w8a8_include=list(w8a8.get("modules") or []),
             packed_modules_mapping=config.get("packed_modules_mapping") or {},
             compressed_tensors_packed=config.get("format") == "pack-quantized",
+            checkpoint_format=checkpoint_format,
+            linear_targets=linear_targets,
         )
+
+    @staticmethod
+    def _supports_compressed_config(config) -> bool:
+        groups = config.get("config_groups") or {}
+        if not groups:
+            return False
+        has_int4 = False
+        for group in groups.values():
+            weight = group.get("weights") or {}
+            act = group.get("input_activations") or {}
+            bits = weight.get("num_bits")
+            if not (
+                bits in (4, 8)
+                and weight.get("type") == "int"
+                and weight.get("strategy") == "channel"
+                and weight.get("symmetric") is True
+                and not weight.get("dynamic")
+                and weight.get("group_size") in (None, -1)
+                and weight.get("actorder") is None
+                and act.get("num_bits") == 8
+                and act.get("type") == "int"
+                and act.get("strategy") == "token"
+                and act.get("symmetric") is True
+                and act.get("dynamic") is True
+                and group.get("output_activations") is None
+                and group.get("format", config.get("format"))
+                == ("pack-quantized" if bits == 4 else "int-quantized")
+                and group.get("targets")
+            ):
+                return False
+            has_int4 |= bits == 4
+        return has_int4
 
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg, user_quant) -> Optional[str]:
         if (
             user_quant == cls.get_name()
             and hf_quant_cfg.get("quant_method") == "compressed-tensors"
-            and hf_quant_cfg.get("format") == "pack-quantized"
+            and cls._supports_compressed_config(hf_quant_cfg)
         ):
-            groups = hf_quant_cfg.get("config_groups", {})
-            for group in groups.values():
-                weight = group.get("weights") or {}
-                activation = group.get("input_activations") or {}
-                if not (
-                    weight.get("num_bits") == 4
-                    and weight.get("type") == "int"
-                    and weight.get("strategy") == "channel"
-                    and weight.get("symmetric") is True
-                    and weight.get("dynamic") is False
-                    and activation.get("num_bits") == 8
-                    and activation.get("type") == "int"
-                    and activation.get("strategy") == "token"
-                    and activation.get("symmetric") is True
-                    and activation.get("dynamic") is True
-                ):
-                    return None
-            if groups:
-                return cls.get_name()
+            return cls.get_name()
         if hf_quant_cfg.get("quant_method") == "slimquant_w4a8" and user_quant in (
             "slimquant_w4a8_marlin",
             "slimquant_marlin",
@@ -870,6 +929,14 @@ class SlimQuantW4A8Int8MarlinConfig(QuantizationConfig):
                 ignore=self.ignore,
                 fused_mapping=fused_mapping,
             ):
+                return UnquantizedLinearMethod()
+            if self.linear_targets is not None:
+                if should_ignore_layer(
+                    layer_name=prefix,
+                    ignore=self.linear_targets,
+                    fused_mapping=fused_mapping,
+                ):
+                    return SlimQuantW4A8Int8LinearMethod(self)
                 return UnquantizedLinearMethod()
             # Qwen3.8 Flash-Next: MoE experts are W4; denselinears are BF16
             # unless listed in mixed_precision.w8a8_include (W8A8). Without
@@ -956,6 +1023,15 @@ class SlimQuantW4A8Int8MarlinConfig(QuantizationConfig):
 
     def get_scaled_act_names(self) -> List[str]:
         return []
+
+    def normalize_checkpoint_weights(self, layer: torch.nn.Module) -> None:
+        if self.checkpoint_format != HY4_CT_W4A8_FORMAT:
+            return
+        for name in ("w13_weight", "w2_weight"):
+            packed = getattr(layer, name).data.view(torch.uint8)
+            packed.bitwise_xor_(0x88)
+            packed.copy_((packed << 4) | (packed >> 4))
+            getattr(layer, name + "_scale").data.div_(16.0)
 
 
 from hcu_sglang.layers.quantization.compressed_w4a8 import HCUW4A8Int8DeepEPMoEMethod
@@ -1054,6 +1130,7 @@ class SlimQuantW4A8Int8MarlinMoEMethod:
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self.quant_config.normalize_checkpoint_weights(layer)
         if get_moe_a2a_backend().is_megamoe():
             from sglang.srt.layers.moe.mega_moe import (
                 build_hcu_w4a8_mega_moe_experts_weights,
@@ -1466,6 +1543,7 @@ class SlimQuantW4A8Int8TritonMoEMethod:
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self.quant_config.normalize_checkpoint_weights(layer)
         layer.w13_weight = Parameter(layer.w13_weight, requires_grad=False)
         layer.w2_weight = Parameter(layer.w2_weight, requires_grad=False)
         layer.w13_weight_scale = Parameter(
@@ -1502,6 +1580,13 @@ class SlimQuantW4A8Int8TritonMoEMethod:
             if self.moe_runner_config.routed_scaling_factor is not None
             else 1.0
         )
+        # Kimi K3 situ betas ride the runner config (KimiK3MoE passes
+        # activation_situ_beta/linear_beta as gemm1_alpha/gemm1_clamp_limit).
+        situ_beta = getattr(self.moe_runner_config, "gemm1_alpha", None)
+        situ_beta = 1.0 if situ_beta is None else float(situ_beta)
+        situ_linear_beta = getattr(self.moe_runner_config, "gemm1_clamp_limit", None)
+        if situ_linear_beta is not None:
+            situ_linear_beta = float(situ_linear_beta)
         return fused_experts_impl_w4a8_triton(
             x,
             layer.w13_weight,
@@ -1517,6 +1602,8 @@ class SlimQuantW4A8Int8TritonMoEMethod:
             w2_scale=layer.w2_weight_scale,
             routed_scaling_factor=routed_scaling_factor,
             shared_output=shared_output,
+            situ_beta=situ_beta,
+            situ_linear_beta=situ_linear_beta,
         )
 
     @torch._dynamo.disable()  # TODO: 性能优化需lmslim/lightop配合
@@ -1616,6 +1703,15 @@ class SlimQuantW4A8Int8TritonMoEMethod:
             device=x.device,
             dtype=x.dtype,
         )
+        # Same situ betas as _apply_triton: the EP path serves the same
+        # Kimi K3 runner config. apply_ep may be driven without one, hence
+        # the double getattr.
+        rc = getattr(self, "moe_runner_config", None)
+        situ_beta = getattr(rc, "gemm1_alpha", None)
+        situ_beta = 1.0 if situ_beta is None else float(situ_beta)
+        situ_linear_beta = getattr(rc, "gemm1_clamp_limit", None)
+        if situ_linear_beta is not None:
+            situ_linear_beta = float(situ_linear_beta)
         return fused_experts_impl_w4a8_triton(
             x,
             w1,
@@ -1632,6 +1728,8 @@ class SlimQuantW4A8Int8TritonMoEMethod:
             routed_scaling_factor=float(routed_scaling_factor),
             num_local_tokens=num_local_tokens,
             shared_output=None,
+            situ_beta=situ_beta,
+            situ_linear_beta=situ_linear_beta,
         )
 
 
@@ -1721,6 +1819,7 @@ class SlimQuantW4A8Int8AiterMoEMethod:
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self.quant_config.normalize_checkpoint_weights(layer)
         if self.use_deepep:
             # DeepEP grouped GEMM consumes the HIPC pack, not the Aiter TP
             # shuffle layout. The HIPC kernel applies the checkpoint's x16
