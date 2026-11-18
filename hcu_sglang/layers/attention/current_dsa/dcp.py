@@ -35,6 +35,7 @@ def _validate_dsa_dcp_launch(
     index_share_for_mtp_iteration: bool,
     decode_cuda_graph_backend: str,
     decode_cuda_graph_max_bs: Optional[int],
+    allow_index_share_for_mtp_iteration: bool = False,
 ) -> None:
     if not dcp_enabled:
         return
@@ -101,10 +102,8 @@ def _validate_dsa_dcp_launch(
             raise ValueError(
                 f"DSA DCP EAGLE requires PP1, attnCP1, and DP attention; got pp_size={pp_size}, attn_cp_size={attn_cp_size}, enable_dp_attention={enable_dp_attention}."
             )
-        if index_share_for_mtp_iteration:
-            raise ValueError(
-                "DSA DCP EAGLE does not support index_share_for_mtp_iteration in the first phase."
-            )
+        if index_share_for_mtp_iteration and not (is_hcu_platform and allow_index_share_for_mtp_iteration):
+            raise ValueError("DSA DCP MTP index sharing is unsupported for this model/cache configuration.")
         if decode_cuda_graph_backend not in ("disabled", "full"):
             raise ValueError(
                 f"DSA DCP EAGLE only supports disabled or full decode CUDA Graph; got {decode_cuda_graph_backend}."

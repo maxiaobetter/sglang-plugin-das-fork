@@ -597,6 +597,9 @@ class DeepseekSparseAttnBackend(
         self.device_sm_major = self.device_capability[0]
         self.kv_cache_dtype = model_runner.kv_cache_dtype
         parallel = get_parallel()
+        from hcu_sglang.layers.attention.hisparse import _matches_channel_fp8
+        from hcu_sglang.layers.glm53_decode import model_matches
+
         _validate_dsa_dcp_launch(
             dcp_enabled=self.dcp_enabled,
             dcp_size=self.dcp_size,
@@ -623,6 +626,7 @@ class DeepseekSparseAttnBackend(
             dcp_group_ranks=tuple(parallel.dcp_group.ranks) if self.dcp_enabled else (),
             attn_tp_group_ranks=tuple(parallel.attn_tp_group.ranks),
             index_share_for_mtp_iteration=getattr(hf_config, "index_share_for_mtp_iteration", False),
+            allow_index_share_for_mtp_iteration=_is_hcu and model_matches(hf_config) and _matches_channel_fp8(hf_config),
             decode_cuda_graph_backend=get_exec().graph.cuda_graph_config.decode.backend,
             decode_cuda_graph_max_bs=get_exec().graph.cuda_graph_config.decode.max_bs,
         )
@@ -2771,6 +2775,11 @@ class DeepseekSparseAttnBackend(
         # Align topk_indices with q dimensions
         if topk_indices is not None:
             topk_indices = self._pad_topk_indices(topk_indices, q_nope.shape[0])
+
+        if _is_hcu and self.dcp_size > 1:
+            valid_rows = get_flashmla_kv_valid_rows(forward_batch, q_nope.shape[0])
+            if valid_rows is not None:
+                topk_indices = topk_indices[:valid_rows]
 
         if self.hisparse_coordinator is not None:
             page_table_1 = self.hisparse_coordinator.swap_in_selected_pages(

@@ -196,8 +196,21 @@ def absorb_bmm(attn, x, weight, out=None):
     return torch.bmm(x, weight) if out is None else torch.bmm(x, weight, out=out)
 
 
+def _channel_fp8_absorb():
+    from hcu_sglang.layers.attention.hisparse import _matches_channel_fp8
+    from hcu_sglang.utils.detection import is_hcu_native_fp8_supported
+    from sglang.srt.arg_groups.model_override_base import model_config_of, resolved_view
+    from sglang.srt.runtime_context import get_context
+
+    config = model_config_of(resolved_view(get_context().server_args)).hf_config
+    return is_hcu_native_fp8_supported() and model_matches(config) and _matches_channel_fp8(config)
+
+
 def around_q_bmm(original, attn, q_nope, *, is_capture_mode):
-    if not getattr(attn, "_hcu_glm_gemm", False) or attn.w_kc.dtype != torch.bfloat16:
+    if not getattr(attn, "_hcu_glm_gemm", False) or not (
+        attn.w_kc.dtype == torch.bfloat16
+        or (attn.w_kc.dtype == torch.float32 and _channel_fp8_absorb())
+    ):
         return original(attn, q_nope, is_capture_mode=is_capture_mode)
     from sglang.srt.models.deepseek_common.attention_forward_methods.forward_mla_rocm import (
         _absorb_weight_bf16,
@@ -211,7 +224,10 @@ def around_q_bmm(original, attn, q_nope, *, is_capture_mode):
 
 
 def around_v_bmm(original, attn, attn_output):
-    if not getattr(attn, "_hcu_glm_gemm", False) or attn.w_vc.dtype != torch.bfloat16:
+    if not getattr(attn, "_hcu_glm_gemm", False) or not (
+        attn.w_vc.dtype == torch.bfloat16
+        or (attn.w_vc.dtype == torch.float32 and _channel_fp8_absorb())
+    ):
         return original(attn, attn_output)
     from sglang.srt.models.deepseek_common.attention_forward_methods.forward_mla_rocm import (
         _absorb_weight_bf16,
@@ -221,6 +237,7 @@ def around_v_bmm(original, attn, attn_output):
     weight = _absorb_weight_bf16(attn.w_vc, attn.w_scale)
     if (
         attn_output.dtype == torch.bfloat16
+        and attn.w_vc.dtype == torch.bfloat16
         and attn.o_proj.weight.dtype != torch.uint8
         and not _is_block_scale_fp8(attn.o_proj)
     ):
@@ -233,6 +250,16 @@ def around_v_bmm(original, attn, attn_output):
         )
         absorb_bmm(attn, attn_output.transpose(0, 1), weight, output.transpose(0, 1))
         return output.flatten(1, 2)
+    if (
+        attn.w_vc.dtype == torch.float32
+        and attn.o_proj.weight.dtype != torch.uint8
+        and not _is_block_scale_fp8(attn.o_proj)
+    ):
+        return (
+            absorb_bmm(attn, attn_output.to(torch.bfloat16).transpose(0, 1), weight)
+            .transpose(0, 1)
+            .flatten(1, 2)
+        )
     return original(attn, attn_output)
 
 
@@ -401,6 +428,7 @@ def around_attn_dispatch(original, attn, batch):
     from sglang.srt.models.deepseek_common.attention_forward_methods import (
         AttnForwardMethod,
     )
+    from sglang.srt.runtime_context import get_parallel
 
     mode = effective_forward_mode(batch)
     if (
@@ -412,6 +440,11 @@ def around_attn_dispatch(original, attn, batch):
             mode.is_decode_or_idle()
             or mode.is_target_verify()
             or mode.is_draft_extend_v2()
+            or (
+                mode.is_extend()
+                and get_parallel().attn_dcp_size > 1
+                and _channel_fp8_absorb()
+            )
         )
     ):
         return AttnForwardMethod.MLA_ROCM
