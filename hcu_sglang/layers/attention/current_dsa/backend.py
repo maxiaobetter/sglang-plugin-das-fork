@@ -2791,8 +2791,11 @@ class DeepseekSparseAttnBackend(
         elif self.use_fused_topk:
             page_table_1 = self._get_fused_topk_page_table(topk_indices)
         else:
+            page_table = metadata.page_table_1
+            if _is_hcu and self.dcp_size > 1:
+                page_table = page_table[: topk_indices.shape[0]]
             page_table_1 = transform_index_page_table_decode(
-                page_table=metadata.page_table_1,
+                page_table=page_table,
                 topk_indices=topk_indices,
                 page_size=1,
                 dcp_size=self.dcp_size,
@@ -4444,6 +4447,8 @@ class DeepseekSparseAttnBackend(
         )
 
 class DeepseekSparseAttnMultiStepBackend:
+
+    eager_metadata_replan_equivalent: bool = True
     # Per-step draft decode replays from precomputed GPU metadata; opt out so
     # decide_needs_cpu_seq_lens' OR over the backends stays False.
     needs_cpu_seq_lens: bool = False
