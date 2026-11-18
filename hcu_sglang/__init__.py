@@ -80,7 +80,7 @@ def register() -> None:
     from hcu_sglang.multimodal_gen import qknorm_rope
     from hcu_sglang.multimodal_gen import wan_sla
     from hcu_sglang.models.deepseek import register_hooks as register_deepseek
-    from hcu_sglang.models.qwen import qwen2, qwen3, qwen3_moe
+    from hcu_sglang.models.qwen import qwen2, qwen3, qwen3_5, qwen3_moe
 
     jit_overlay_loader.register_hooks()
     configs.register_hooks()
@@ -103,9 +103,6 @@ def register() -> None:
     dsa_topk.register_hooks()
     current_dsa.register_hooks()
     hisparse.register_hooks()
-    from hcu_sglang.layers import glm53_decode
-
-    glm53_decode.register_hooks()
     dsv4_compressor.register_hooks()
     index_topk_share.register_hooks()
     triton_hcu.register_hooks()
@@ -218,6 +215,8 @@ def register() -> None:
     qknorm_rope.register_hooks()
     wan_sla.register_hooks()
     register_deepseek()
+    from hcu_sglang.layers import glm53_decode
+    glm53_decode.register_hooks()
     model_utils.register_hooks()
     qwen2.register()
     qwen3.register()
