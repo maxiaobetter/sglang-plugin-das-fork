@@ -4184,3 +4184,174 @@ GLM Channel FP8 HiSparse 的 unfused TopK 复用 HCU 原生 `sgl_kernel.fast_top
 单服务 IFB 的 PP1/DCP1 路径复用框架的 prefill staging。Prefill 在 DCU 写入 packed FP8 KV，完成后经 host pool 备份进入 HiSparse decode 队列。PD decode 的传输后端校验仅在 PD decode 生效。单请求的 prefill 容量取决于 DCU KV 池，增大 host/device ratio 不会增大该池。
 
 在用户 fork `85c1b05` 的 attention DP8/EP8 实例上，5/1/6 完成四条真实对话。按 DP rank 路由的 8 条 128-token 输入和两波共 16 条 4,608-token 输入，输出 token、EAGLE verify 与接受统计和原生逐条一致。三种较小 draft 宽度覆盖参数检查及既有 swap-in 组件验证。1M 请求在当前八卡环境受单 rank prefill 设备池容量限制。
+
+## 2026-11-04 GLM5.3 Flash HCU sparse MLA
+
+SCNet 的 FlashMLA sparse prefill 在 gfx936 上报告找不到设备内核镜像。参考 DAS
+`f3c0395f73` 的 Triton per-token sparse MLA，在现有 plugin sparse 调用处接入
+BF16 576/512 路径。每个程序计算 16 个 query head，支持原拓扑的 64 head。
+KPool 处理完整索引行，保留主体索引后的有效尾部，并掩蔽无效槽位。Attention sink
+参与归一化分母，输出沿用 BF16。
+
+SCNet 单卡数值探针覆盖 8、32、64 head、带空行和尾部索引，均通过 FP32 Torch
+对拍及变索引 Graph replay。完整 P/D 服务、AIME25 和 HumanEval 仍待验证。
+
+完整 Decode Graph 的首个失败调用来自 V32_NO_ROPE 路径。保留 LightOp 对
+528 字节 packed KV 的 gather/dequant 和 compact 索引，将后续 512 维 BF16
+注意力交给同一 Triton 实现。回归矩阵补充 512/512 无 RoPE 形状并在 SCNet
+复跑通过，原拓扑的完整 P/D 和精度仍待验证。
+
+后续完整 Graph 启动观察到 vendor backend 退出和控制器 EOF，日志未标出
+退出的算子。对 528 字节 V32_NO_ROPE 行，按 DAS 的 FP8 与四组 FP32 scale
+布局，在 Triton 注意力内解量化选中的 KV 行，移除该调用对 LightOp gather
+的依赖。SCNet 的 packed FP8 eager 和变索引 Graph 回归通过。
+
+### 2026-11-06 P/D 性能路径静态复核
+
+当前实验启动配置为 `--quantization w8a8_int8 --moe-a2a-backend deepep --moe-runner-backend deep_gemm`。`layers/quantization/deepep_int8.py` 的 `around_create_runner` 在 `requested()` 命中后构造 `DeepGemmInt8Runner`，`around_apply` 及 `around_run_moe_core` 调用该 runner。P 的 normal 路径为 `layers/moe/deepgemm_int8.py:_normal`，在 CPU counts 列表上做 256 对齐检查后复制至设备；D 的 low-latency 路径为同类的 `_masked`。源代码接线只说明该配置下的预期路径，真实服务命中和耗时仍需 profile 证明。
+
+此前本地提交 `252f36e` 消除了 `lightop_deepep.py` 中的 counts 回读，但该函数以 `("deepep", "lightop")` 注册，不能作为当前 DeepGEMM 部署的优化。已撤回该候选及其专用测试，没有部署或性能收益结论。后续必须先证明实际 runner 命中，再比较同硬件、同参数、同负载下的算子与端到端耗时；保留 DeepEP、EAGLE、CP、HiCache 等原功能。
+
+目前 SCNet 跳板机持续出现 SSH 连接超时或认证后命令无响应；不启动远端 shell 的端口转发同样未建立。未据此判断原 P/D 服务退出，也未重复加载模型。完整模型 profile、数值与精度回归、P/D 优化及 A/B 均为 pending。实验脚本与结果继续使用容器 `/home/work/agent/das-glm53-tx-pd/perfopt-20261105/`。本次只完成静态调用链复核，L0 和导览检查通过，不继承历史 GPU 验证为当前验收。
+
+### 2026-11-06 冷启动架构检测与 GPU 上下文
+
+按 hcu-plugin-dev 与配套 hcu-adapter-dev 规约，保留 `get_gcn_arch(device_id)` 原有按设备属性查询；仅架构布尔检测在 CUDA 未初始化且 adapter 可用时复用其架构元数据。adapter 缺失及已初始化路径仍查 Torch 属性。gfx936/gfx938/gfx942 分类与 native FP8 布尔语义不变，无新增配置。提交范围为 detection、离线回归及本记录。
+
+配套 adapter 同时消除 import 期 GPU 分配并接管冷启动硬件查询。实际 P/D 环境的完整 bootstrap 探针无 CUDA 初始化尝试，新进程 KFD 显存全零；D 重启健康 200，8 个 scheduler 各占本卡，改前 CPU worker 与跨卡 scheduler 的 GPU 0 上下文已消失。原 trace 的通信等待与 GPU 0 runlist 超订阅是诊断证据，提速仍需同配置新 profile 和预热 A/B。不得继承历史精度。证据位于实验 `perfopt-20261105/cold-start/`，P 启动及 AIME25/HumanEval 尚待完成。
+
+本轮离线测试 67 项中 66 项通过；唯一失败仍为既有 launcher 测试期望旧 bootstrap/官方模块转发，而当前入口转发 `hcu_sglang.launch_server`，已用改前 HEAD 复现，不属于本次 detection 修改。L0、导览重建与 freshness 检查通过。浏览器预览因本地 `file:` 协议被工具安全策略拒绝，未进行截图、交互及窄屏验收，也未绕过该限制。
+
+### 2026-11-06 normal INT8 专家计数拷贝候选
+
+P 新 trace 的 `hipMemcpyWithStream` 累计 3.697 秒/994 次，包含多种传输，不能全部归因于专家计数。实际 `DeepGemmInt8Runner._normal` 每次使用 `torch.tensor(counts, device=x.device)`；原生 `ep_moe/layer.py` 与官方 FP8 normal runner 的普通 offloader 分支使用 pinned CPU tensor 加异步设备拷贝。本候选在该调用点对齐，目标显式为输入设备。offloader 禁止 copy engine 时保留原有直接 tensor 路径，不在本候选扩展 offload 支持；量化、padding、scatter/GEMM/激活/gather 及 output 初始化保持原样，未改变 low-latency 路径。
+
+真实公共 `run`→normal→combine-input 的 CPU 接缝回归保留计数、两个 GEMM 及 gather 出口，普通路径在改前失败、改后通过，并核实禁止 copy engine 时保持旧路径。数学和 vendor consumer 不由 mock 证明。首次设备探针发现 adapter 未提供官方 no-CE helper 所需的 `sgl_kernel.elementwise.copy_to_gpu_no_ce`，因此撤回新增 helper 调用；这不是本次在服 P 的执行路径，不能宣称 no-CE 支持。失败日志保留。候选文件与 baseline 独立保存于实验 `normal-counts-candidate/`，仅在已确认 GPU 空闲的 a12r4n13 测试；没有部署到在跑 P/D，不改变当前 AIME25/HumanEval 的代码。GPU 数值、预热算子时间与整模型 A/B 仍为 pending。
+
+后续 `probe-v2.log` 与 `result.json`：GPU 0/3、真实 LightOp scatter→两次 DeepGEMM→激活→gather，BF16 输出与原路径逐位一致，共 16 项，覆盖 1/16/129/257 行、零计数专家、两种 offloader 配置（禁止 CE 时仅证明保留旧路径，不证明 no-CE 语义）。使用真实 4096 hidden / 2048 intermediate / 4 local experts；没有实际多 rank collective，不能代替 EP8 整模型验收。两卡每臂预热 5 次，三轮交替顺序、每轮 30 次，小样本候选约 0.38–0.39ms、原路径约 0.43–0.45ms。此为该 FFN 样本的主机加设备时间，不是整体 P 提速。P normal 原配置禁用 Graph，本轮不宣称 normal Graph 支持。整模型 A/B、profile 与数据集回归仍待候选部署后的独立验证。
+
+设备环境为 gfx936、Torch 2.11.0、HIP 6.3.26113、驱动 6.3.31-V1.5.0a；结果附内核版本和 topology 架构字段。当前离线 68 项中 67 项通过，唯一失败仍是上述改前可复现的 launcher 用例；L0、diff 与导览 freshness 检查通过，浏览器验收仍受前述协议限制。
+
+### 2026-11-06 CP 缓存命中分歧与协调候选
+
+原代码完成 AIME25 25/30（83.33%）、HumanEval 163/164（99.39%），之后三轮 P 稳定基线在首个重复 4K 预热请求卡住，没有有效新基准成绩。非阻塞 Python 栈和 locals 确认同一请求在 CP rank 0 的逻辑行数为每卡 512、rank 3 为每卡 32，即新 token 总数 4096 与 256。不同缓存命中导致 collective 输入不一致。watchdog 随后启动 8 个阻塞 py-spy 诊断，又将 scheduler 停在 ptrace；已终止本服务的诊断与失效 P，D 保持健康。watchdog 的巨大缓存页清单是在途请求快照，不能作为独立泄漏根因。
+
+新增机制归 plugin：上游与参考 fork 的统一缓存 match 均未协调最终可用的 Mamba/device prefix，不能把新增协调能力塞入 adapter。正式 AROUND Hook 为 `UnifiedRadixCache._match_tree` 和 Python `UnifiedTreeCore.match_prefix`，通过 ContextVar 将一次真实 COW match 的 cache 传给对应 core；其他 core 和非 COW 查询保留原调用。只在 HCU、Mamba、CP>1 生效。利用原 cache 的 attention CPU groups，对设备/host 命中与 branching 元数据做 min/max 一致性检查；分歧时消费中间 lookup 的 cache actions，缩短查询并重新匹配，直到得到所有 rank 共同可用的前缀。COW、最终 cache actions 和 linker 仍由原 `_match_tree` 执行一次。没有修改上游源码，没有关闭 HiCache、CP 或 SBO；普通一致命中保持命中。
+
+真实上游 cache fixture、GPU pool 和 8-rank Gloo 在 `cp-cache-consensus/` 复现改前命中 `[0,32,32,32,32,32,32,32]`，改后共同选择零前缀。离线回归覆盖 action/COW 顺序、一致命中、无关 core、作用域异常清理与非 CP/非 COW 路径。实际正向缓存 COW、重复长请求、P/D 集成和新版本精度尚待完成；Python core 之外的树后端、streaming session shortcut、L3 linker 不在本轮实证范围。
+
+后续正向 8-rank fixture 保留全部 rank 的 32-token 缓存命中，并且每 rank 只分配一次 COW，来源 slot 与原 cached slot 相同。仓内分布式用例进一步覆盖 page_size=256、Mamba extra_buffer、512-token 一致命中与单 rank 状态被驱逐后的共同回退，8 rank 全部通过；首次 fixture 未启用 extra_buffer 的配置错误保留于 `registered-test.log`，修正后为 `registered-test-v2.log`。离线 4 项通过、1 项分布式用例默认跳过，全套仍有既有 launcher 失败。
+
+仅部署 CP 协调的 manifest 为 `cp-fix-deployment.json`，仍保留原 normal INT8 runner。P 重启后的三个实际长前缀请求均完整输出正确答案 2、2、7，首个请求 3931 prompt tokens、cached=0，后两次 cached=3840，分别约 12.62/3.03/0.96 秒；这是集成/缓存命中证据，不当作稳定性能 A/B。证明没有通过关闭缓存逃避分歧。原始请求及响应保存在 `cpfix-repeated-prefix-smoke.json`。三轮不带 profile 的同硬件 P 基线已启动，新组合的全集精度仍待回归。
+
+该三轮基线只有首轮有效：Mean TTFT 16480.66ms、时长 27.56 秒。第二轮预热期间，P 在 Mamba checkpoint 的 `_alloc_mamba_slot` 报 `Can not alloc mamba cache`，其余两轮没有有效成绩；客户端的空 E2E percentile 异常来自请求全部失败，不能用统计补零修饰。CP 命中协调已实际执行 56 次，后续缺口转为源状态锁及 checkpoint 槽位压力。原生实现会在压力下释放已消费 COW 源的 Mamba 锁，官方路径缺少这段生命周期处理，下一候选需在真实结果 fence 后验证，保留 FULL KV 锁与原 96-slot 配置。
+
+### 2026-11-06 已消费 Mamba 源状态的锁生命周期
+
+参考 fork 的 `MambaComponent._alloc_mamba_slot(req)` 在 lazy-buffer 压力路径释放已消费的 COW 源状态锁。当前部署没有启用该新 lazy-buffer 模式，新增 plugin 只实现共同的生命周期规则：在 `SchedulerBatchResultProcessor.snapshot_auxiliary_output_starts` 正式 AFTER seam 上，原方法先执行；仅 HCU GLM extra-buffer 的 extend 批次、且 `copy_done.query()` 已完成时，释放整个已完成批次的旧 Mamba 源锁。FULL KV 锁保留，receipt 标记 Mamba 已释放，最终 unlock 不重复释放；未完成 fence、decode、其他模型和 session 路径保持原行为。各生产调用点都在 copy_done.synchronize 后调用此 seam，另以 event query 防护。这里不实现 lazy buffer，不增大槽位、不关闭缓存或 overlap。
+
+`mamba-cow-pressure/probe.py` 使用真实 cache、Mamba GPU pool、两个请求共享源状态及已完成的 COW 拷贝，将池填满；原路径稳定复现 `Can not alloc mamba cache`。候选 8 张卡均能释放旧源并复用其 slot，FULL 锁仍为 2，Mamba 锁为 0；将复用 slot 改写为 99 后，两个请求自身 temporal/conv 状态仍逐位为原值 1/2，最终 unlock 不双重释放。仓内分布式测试合并 page256 CP match 与该压力场景，`registered-test-cow.log` 的 8 rank 全部通过；另有 3 项 CPU fence/receipt/准入回归。实现与 root entry 已部署，manifest 为 `mamba-lock-fix-deployment.json`，P 按原 96 槽参数重启。稳定三轮及全集新组合回归仍待完成，normal INT8 异步计数仍未部署。
+
+### 2026-11-06 CP LayerSplit HiCache 写回完成回收
+
+上述源锁候选仍在第二轮预热失败，只有首轮有效（Mean TTFT 16595.32ms、28.30 秒）。定向异常库存诊断再次复现，失败的 rank 0～2 各有 free=0、evictable=0、protected=48、16 个持有状态的请求、47 个 pending write 节点；7 个 ACK 全部完成、覆盖 43 个节点。rank 3～7 的日志使用率约 0.59，失败三 rank 约 0.97。库存为 `mamba-slot-diagnostic/failure-*.json`，不是 watchdog 的在途 census。临时异常诊断已从服务源码移除并恢复原文件 SHA。
+
+原 `_sync_hicache_ready_counts` 对写回 ACK 队列长度取全 rank MIN。LayerSplit 的本地写回队列可不同，空队列将其他 rank 已完成的 ACK 一直压为零，其写回锁无法回收。`cp-write-acks/probe.py` 使用真实 cache/tree/allocator/锁与 GPU→pinned-host 复制、完成 event：3/8 rank 持有写回锁、另 5 rank 没有 ACK，原逻辑稳定复现前三 rank 槽位不足；按本地已完成 ACK 调原 writing_check 后，8 rank 全部恢复分配，host 快照逐位一致。这验证资源生命周期，未声称覆盖整套 HiCache vendor I/O 数值。
+
+新增 `cp_hicache_write_ack` 经 root 正式注册 AROUND `UnifiedRadixCache.writing_check`。仅 HCU GLM 标记池、CP LayerSplit 大小匹配、attention TP=1、PP=1、cache 模式、write_through 且未启用 L3 时，使用本地连续完成的 ACK 数调用当前 original；原事件 synchronize、finish_write_through、锁释放和 metrics 路径保留。load ACK、全局 ready-count/digest 同步和其他拓扑/策略保持原行为。CP 前缀协调仍配套启用，不能将本地 ACK 回收当作普通 TP 或 L3 的通用替换。首次实际回收与全局计数不同时记录一条日志，供运行命中核验；没有新增环境变量或修改官方源码。
+
+3 项 CPU 边界回归通过，覆盖零全局计数、空/未完成本地事件、PP/L3/TP/非 LayerSplit/非 GLM 回退；`registered.log` 正式 Hook 的 8 rank 全部通过，每 rank 4 项，包含上述真实缓存反例。全套 80 项中 77 通过、2 个 GPU lane 跳过、1 个修改前已存在的 launcher 期望不匹配失败；L0、guide 构建与快照检查通过，页面浏览器验收仍保留之前 file URL 安全策略阻止的未验证说明。另一个“P 完成 checkpoint 后跳过其 Mamba 锁”的候选通过了局部压力检查，但不能解决写回锁积压，已以 `fc8e35a` 回退且从未部署；证据保留在 `mamba-slot-diagnostic/inflight-probe-v2.log`，不混入此轮归因。
+
+本次仅同步 root 与新 ACK 模块，清单 `cp-write-ack-deployment.json`；源锁、CP 协调和 cold-context 修复保持，normal INT8 runner 仍为原同步计数版本。P 重启与三轮稳定基线已排队在 `p-f14-writeack-baseline3/`。新组合持续压力、完整数据集精度和 normal-counts 的同硬件 A/B 仍待完成，旧全集结果只归属原 context-fix 组合。
+
+服务原参数重启后长前缀 2/2/7 完整通过，后两次 cached_tokens=3840；实际日志确认 8 rank 均使用本地 ACK 回收。随后三轮各 384 个预热与 128 个正式请求全部成功，共 1536 请求，未再出现 slot 断言。三轮 Mean TTFT 为 38952.43/16263.06/16246.91ms，时长 66.23/27.53/27.55 秒；中位数 16263.06ms。首轮异常波动保留，未剔除或称为稳定提速。压力记录中各 rank Mamba 使用率峰值均为 0.66；这是本轮观测上限，不作为配置承诺。完整逐轮日志/CSV、实际 Hook 命中与验收记录为 `p-f14-writeack-baseline3/`、`p-writeack-baseline3-validation.json`、`writeack-pressure-progress.json`。
+
+三轮计时均未开 profile。另起相同 4K/1/128 压力，观察任一 P rank 达到 8 请求/32768-token 的完整 chunk 后等待 30 秒，采集 CPU/GPU 10 steps、record_shapes=true、with_stack=false，目录为 `p-counts-before-trace/`。此轮专门用于随后 normal-counts 对照，不能把诊断压力中的时间加入正式三轮成绩；8 rank 导出完成后再停止压力并单独重启 P 切换计数候选。D 不重启，两个角色的启动参数与缓存修复保持。
+
+### 2026-11-07 normal INT8 异步计数实际 A/B
+
+F14 的两臂均验证 3×(384 预热 + 128 正式) 全部成功，分别各 1536 请求；INT8 checkpoint、P/D 拓扑、seed、原参数与 cache 修复保持。唯一 P 运行时代码差异为 `2401df5` 的 normal runner（`normal-counts-deployment.json`），无 profile 计时。同步臂 Mean TTFT 38952.43/16263.06/16246.91ms、吞吐 1.93/4.65/4.65 req/s；异步臂 16631.29/15996.88/16302.25ms、4.59/4.68/4.64 req/s。三轮中位数 TTFT 16263.06→16302.25ms、吞吐 4.65→4.64 req/s，未测出端到端提速。未剔除首轮波动，也不将新臂较小波动归因为代码。两臂原始结果在 `p-f14-writeack-baseline3/` 和 `p-f14-counts-after3/`。
+
+两臂独立压力 profile 均完成 8 rank、10 steps；以 `aten::copy_` 外部事件 ID、36 个 INT32 和 144-byte H2D 区分专家计数复制。rank 0/1 各由 430 次 `hipMemcpyWithStream` 降为 0，累计 CPU 调用时间分别从 406.46/419.75ms 降为 0；其余同步复制依然存在。rank 0 所有同步复制从 1090 次、1015.22ms 降到 653 次、599.39ms。记录 `p-counts-profile-comparison.json`。GPU 主热点仍为 INT8 grouped GEMM（860 次，约 1.65/1.62 秒）、ReduceScatter 和 DeepEP 通知/dispatch/combine；两次 trace 批次形状不同，GPU 跨度差不当作算子提速。异步计数保留为已验证的 CPU 同步减少，不晋级为端到端性能收益。
+
+候选重启时 router 的旧健康状态曾使首个 smoke 提前发出而报 502；原日志单独保留，未算入基准。等待器补充直连 P、D `/health` 为 200 后再发请求，后续三次 2/2/7 和缓存命中均通过。A12 节点的单机 8-rank normal DeepEP 初始化复验通过；此前人为给单机探针配置非零 RDMA buffer 的断言是探针参数错误，修正为 P 实际单机配置后通过。F14 A/B 已封存；最终 P 按用户原位置迁回 A12，保持同一 INT8 组合，迁移与数据集验收不外推为同硬件性能差。
+
+### 2026-11-12 GLM5-Next Decode 辅助流诊断开关
+
+Plugin 在 `Glm5NextDecoderLayer.__init__` 的 AROUND hook 中读取 `HCU_PLUGIN_GLM5_DISABLE_DECODE_ALT_STREAM`。在 HCU Decode 主模型构造时，显式启用后将传给 Attention 和 MoE 的 `alt_stream` 置空，作用发生在 Graph capture 之前。默认关闭。启动方式和回退见 [配置手册](configuration.md#glm5-next-decode-辅助流诊断)。
+
+本地构造 hook 回归覆盖开启、关闭、Prefill、非 P/D、非 HCU 和 NextN。Python 3.11 全量单测中有一项 launcher 既有失败，已用基线提交复现。SCNet 的同配置 VERIFY trace、生成和性能 A/B 待验证。
+
+
+### 2026-11-12 GLM5 NextN 辅助流和 DeepEP 接收 hook
+
+GLM5 NextN 复用 DeepSeek V2 Decoder Layer。Plugin 在 GLM5 NextN 构造范围内复用 HCU Decode 辅助流开关，阻断传给 Draft Attention 和 MoE 的辅助流。新增独立进程开关控制 DeepEP low-latency 接收 hook，关闭时沿已有完成事件等待路径运行。两项均在 Graph capture 前生效。
+
+Python 3.11 的两项 GLM5 构造回归、L0 和离线导览检查通过。全量 82 项中有 1 项 launcher 失败（已用修改前的提交复现），2 项跳过。
+
+SCNet INT8 Decode 在 f14r1n15/f14r1n16 的 16 个 rank 上均记录了 Draft 辅助流和 DeepEP 接收 hook 已关闭。保留 `DEEPEP_ENABLE_LL_LAYERED_OPT=1` 的首轮完成了 Verify、Draft 和 Draft Extend Graph 捕获，Verify 捕获耗时 147.16 秒。上一次使用接收 hook 的同拓扑运行约 13.23 秒。此处仅记录启动时观测值。实验目录为 `d-trace-20261112-draft-no-hook`。
+
+第二轮将 Decode 的 `DEEPEP_ENABLE_LL_LAYERED_OPT` 和 `SGLANG_ENABLE_OVERLAP_PLAN_STREAM` 设为 `0`，共享专家融合、SBO、TBO 在解析后均关闭。Verify Graph 捕获约 13.25 秒。在 rank 达到 8 个运行请求并等待 30 秒后抓取 16 个 rank 的 Torch trace。按 `hipGraphLaunch` 的 correlation 关联 GPU kernel，Draft、Verify、Draft Extend 各 160 次 replay 均为单流。上一轮只关主模型辅助流的 trace 中，Draft 和 Draft Extend 分别用 2 和 3 条流，各 160 次均观察到同一次 replay 内的跨流 kernel 重叠。新旧样本的实际 batch size 不同，未据此比较吞吐。采集后两个 Decode health endpoint 均返回 200。
+
+
+### 2026-11-17 INT8 masked DeepGEMM 对齐 TX 新接口
+
+以 `sglang-das` 的 `main_glm53_flash_feature_cleanup_tx` 远端提交 `49ac08c727219e336e1330ab94836037fb0ef24a` 为调用基线。ASM 分支的 gate/up 与 down 改用 `m_grouped_i8_gemm_nt_masked(..., shuffle_unique=0)`，不传旧 `backend` 或额外 `config`。normal 和非 ASM 分支保持原路径，官方 SGLang 与 Adapter 没有变更。之前的 shuffle=1/W6 接口试验已由 `370b58b` 回退。
+
+固定 vendor 为 `deepgemm==2.1.0+dtk2604.torch2110.2609201822.g5d0adc`。该包的 shuffle=0 路由到 masked ASM 的内部 MODE=1002，与旧入口默认配置相同。Plugin 现有打包与该包 `marlin_i8_masked_weight(..., shuffle_unique=0, low_memory=True)` 的 INT8 存储逐元素一致，因此保留现有打包，避免引入来源辅助函数残留的旧 backend 参数。接口对齐不等同于 kernel 或性能对齐。
+
+GPU 算子验证覆盖 E=18、capacity=256、N/K=4096/4096 和 4096/2048，以及每专家有效行数 0/8/48/64/128/256。两组均通过打包精确比较、eager BF16 输出比较与修改输入后的 CUDA Graph replay 比较。输出容差 rtol=0.01、atol=0.02。实验目录为 `$AGENT_DIR/das-glm53-rebase-20261116/perf/gemm-tx-shuffle0-20261117`，仅使用既有两台 Decode 节点，Prefill 未改动。本次未运行数据集精度。
+
+调用链回归使用实际 post-load 与 DeepEP MoE 分发入口，验证 gate/up、down 共用对应 masked 权重、shuffle=0、空专家和 expected_m 容量截断。容器定向测试通过。Python 3.11 L0 通过；252 项全量单测为 12 failures、13 errors、26 skipped，25 个失败/错误用例与回退后的基线完全一致。离线导览已重建并通过快照检查；浏览器安全策略拒绝 file URL，因此渲染、交互和窄屏复验未执行。
+
+服务在任一 rank 达到 bs8 后保持至少 30 秒，采集了 16 rank、10 steps 的 CPU/GPU trace。TP0 文件 `1794908784.4897802-TP-0-DP-0-EP-0.trace.json.gz` 的 10 个 VERIFY 均为 bs8，按 hipGraphLaunch correlation 关联 Draft、Verify、Draft Extend 的 GPU kernel。每轮 94 次专家 GEMM，仍为 `DEEPGEMM_I8_I8_BF16_PERCHANNEL_MARLIN_ASM_TN_MT256x64x128_WGM8_GROUPGEMM_MASKED`。
+
+同负载脚本、同节点和同 vendor 的修改前/后样本，专家 GEMM 累计分别为 17.208/17.152 ms，Verify GPU 跨度为 60.450/60.533 ms，整轮 GPU 跨度为 75.673/76.871 ms。后者增加主要位于 Draft DeepEP dispatch（0.457/1.717 ms），不能归因为 GEMM 变慢。用户参考 trace 的对应专家 GEMM 为 10.171 ms、整轮 62.905 ms，使用 cooperative kernel。此次实现完成调用接口对齐，未证明参考性能已对齐；历史 trace 对比不是正式端到端吞吐或 TPOT 测试。
+
+采集后发生已知的 Invalid address access / Segmentation fault，16 份 trace 均已保存；按相同候选配置重启 Decode 恢复服务。部署、probe、单测、profile 压力及恢复记录保存在上述实验目录。
+
+### 2026-11-17 INT8 专家 GEMM 对齐 BM128 cooperative kernel
+
+上一轮只对齐 Python 调用，`g5d0adc` 包将 shuffle=0 路由到旧 Marlin ASM MODE=1002，未达到参考 kernel。此次在两台既有 Decode 的实验目录隔离加载 `deepgemm==2.1.0+dtk2604.torch2110.2611111558.gfcff57`，其 `marlin_i8_masked_weight` 产生 `[E,K/64,N/32,2,4,16,16]` pair32 权重。Plugin 调用 vendor 打包并验证布局，在 gfx936 上向统一 masked API 传入 MODE=1001，选择 BM128/BN256/BK128 cooperative kernel。其他架构不强制该 MODE；normal 与非 ASM 分支不在本轮服务验证范围。
+
+参考 `ef52f84` 与新包对应源码 `fcff57a` 的 kernel 主体、辅助函数和常量，去掉注释与空白后 SHA256 均为 `8f29070cd965d32248eea3f4a8b77c9acf47517657e329fa9684451a76aaa403`。命名空间由 `deepgemm_gfx936_masked_int8_cooperative` 改为 `gfx936_gfx938_shared::m_grouped_int8_gemm_nt_masked_pair32_bm128_bn256_bk128`。两者均使用 512 threads、32768-byte dynamic shared memory、2 blocks/CU。保留新包名称，不通过修改符号名称模拟对齐。旧参考 wheel 与当前 Torch ABI 不兼容，未替换在服依赖。
+
+隔离目录为 `$AGENT_DIR/das-glm53-rebase-20261116/perf/gemm-cooperative-20261117/new-wheel`，Decode 启动脚本将它置于 Python 搜索路径首位，Prefill 和系统包未替换。重启此候选必须使用该实验目录的 deploy/switch.sh，避免载入旧包。旧包返回三维布局时，Plugin 在 post-load 阶段显式拒绝，不静默回退。
+
+两组 E=18、capacity=256、N/K=4096/4096 与 4096/2048 的 GPU eager/Graph 数值探针通过，独立 trace 已实际命中新版 BM128 cooperative kernel。调用链与旧布局拒绝两项容器测试通过。L0 通过；253 项全量单测为 12 failures、13 errors、27 skipped，与修改前相同失败集合。数据集精度未执行。
+
+完整服务达到单 rank bs8 并保持至少 30 秒后，已保存 16 rank、10 steps 的 trace。TP0 `1794914098.1688757-TP-0-DP-0-EP-0.trace.json.gz` 和 TP13 各有 940 次专家 GEMM，全部命中新命名空间下的 BM128 cooperative，无旧 Marlin ASM masked kernel。实验 trace 位于 `$AGENT_DIR/das-glm53-rebase-20261116/perf/trace/gemm-cooperative-20261117/`。采集后服务出现已知的 Segmentation fault；恢复同一候选后，2026-11-17 Decode `/health` 返回 200。
+
+TP0 每轮专家 GEMM 累计由前一版 17.152 ms 降为 16.050 ms，参考为 10.171 ms；相邻 Draft 首个 GPU kernel 起点间的完整迭代均值为 79.580 ms，前一版 79.286 ms，参考 63.840 ms。此指标不同于 Draft 至 Draft Extend 结束的模型窗口，也不是单 token TPOT。当前 DeepEP dispatch/combine 分别为 6.412/7.969 ms，前一版 6.559/6.215 ms，参考 3.717/2.356 ms；通信 kernel 耗时包含等待，不能直接归因为网络本身。此次证明实际 kernel 已对齐，未证明整轮性能已对齐；历史参考与当前负载的完整输入、路由及编译环境仍有待逐项控制。
+
+### 2026-11-17 ef52f84 post20261022 显式 cooperative 接口
+
+按用户提供的 `deepgemm-2.1.0.post20261022+das.dtk2604.ef52f84` wheel，匹配 TX 分支 `1b0a352df3975baa40569aa4ff5d7caea11e1a6c` 的调用方式。权重打包与 gate/up、down 两次 masked GEMM 均传 `shuffle_unique=0, backend="cooperative"`，移除上一版 MODE=1001 和对应 layer 状态；保留七维 pair32 布局检查。该包未显式指定 backend 时返回旧三维 masked 权重，真实 post-load 回归已复现布局拒绝；cooperative 分支本身拒绝非空 MODE/config。此路径固定依赖支持显式 cooperative backend 的 vendor API，不静默兼容不接受此参数的新包。验收范围为 gfx936 INT8 low-latency Decode，normal、其他架构与数据集精度未在本轮验证。
+
+此次 post20261022 与之前 ABI 不兼容的 post20261021 是不同文件：wheel SHA256 为 `4d65ac713aed3ce33650f736e75333229e2d0610cdd48aa35c50e13b6c75323a`，op.so 为 `59258b5fde5495c4068f61b3ea748642ac39fb0a2152156bb8dc2f102226c029`。两台 D 的 Python 3.10.12、Torch 2.11.0 均可正常导入；动态符号中存在原始 `deepgemm_gfx936_masked_int8_cooperative::w8a8_int8_masked_cooperative_bm128_persistent`。部署目录为 `$AGENT_DIR/das-glm53-rebase-20261116/perf/gemm-ef52f84-post22-20261117`，启动脚本从其 `wheel` 目录加载依赖。
+
+修改后真实 post-load → MoE 分发、旧布局拒绝两项容器测试通过，前者断言两次 GEMM 的 backend 且不允许 config 参数。GPU eager/Graph 对拍覆盖 E=18、capacity=256、N/K=4096/4096 与 4096/2048、空专家和变输入 replay，独立 trace 命中原始 cooperative kernel。L0 通过；本次源码来源契约检查仍有两项既有不一致（DSA metadata、SlimQuant），已核对相关文件与父提交完全相同，本次 DeepGEMM owned AST 更新后匹配。未将历史全量单测或精度结果记作本次通过；导览快照重建，浏览器渲染未复验。
+
+首次 profile `1794924807.77803` 在已知采集后 VMFault 中缺失 TP12，仅保留为 15-rank 调试证据。恢复后重新发压，脚本遇到启动阶段一次 503，于发送压力请求前退出；随后添加连续三次健康检查成功的准入重试，保留失败日志，压力输入及服务参数不变。第二批 `1794925581.1361392` 完整保存 16 rank，每 rank 均有 10 个 VERIFY bs8 与 940 次原始 cooperative 专家 GEMM，未拼接两批数据。16 个 scheduler 的实际加载库路径及 SHA256 已核对。新批次位于 `$AGENT_DIR/das-glm53-rebase-20261116/perf/trace/gemm-ef52f84-post22-recapture-20261117`，按 SGLang 原生 `ProfileMerger.merge_chrome_traces()` 合并。
+
+对全部 16 rank 分别计算后取均值，完整迭代为 80.124 ms（各 rank 80.051–80.199 ms），专家 GEMM 累计为 16.199 ms/轮；相同压力配方下 gedf118 为 80.877/15.977 ms，gfcff57 为 79.087/16.176 ms。每份 trace 是单次采样，expert 路由及有效上下文仍可能不同，不能将这些微小差异当作确定性加速结论。当前仅证明参考 backend、布局和原始符号实际命中，仍未达到参考 trace 的性能。第二批采集后也出现已知 VMFault；按相同候选恢复后，2026-11-17 22:35（Asia/Shanghai）两台 Decode 的 `/health` 连续三次均为 200，记录见重采集实验目录的 `recovery.json`。
+
+### 2026-11-18 gedf118 接口与 INT8 路径整理
+
+当前包固定 `2.1.0+dtk2604.torch2110.2610301506.gedf118`；masked 打包保留 shuffle=0 七维 pair32，GEMM 显式 MODE=1001，不传 ef52f84 的 backend 参数。normal 打包与 GEMM 保留独立 contiguous 布局。合并 post-load 中重复的 vendor 打包分支，normal/low-latency/auto 只准备各自需要的布局，并保持重复 post-load 的幂等性。
+
+审计顶层注册入口、全仓 caller 与测试后，移除未注册的 `quantization/deepep_int8.py` 和其独立 `DeepGemmInt8Runner`/权重处理；原模块只保留被当前链路使用的 `requested()` 判据。实际执行统一为 `deepep_current` + `deepep_fp8` + `moe/deepep_int8.py`，未新增第二套 Hook。normal counts 回归从旧 runner 移到当前真实分发链；异步拷贝显式使用输入设备，no-copy-engine 分支保留原专用 helper。
+
+Adapter 仅补齐既有 sampling/grouped-topk 桥的导入档位说明，并验证 DeepGEMM alias 保留原始 INT8 vendor 函数。未改 Adapter 的专家计算、dense GEMM 或公共平台策略；未改官方源码。旧文档与历史来源哈希保留日期语义，当前接口要求集中在配置手册。
+
+容器内真实调用链、三种 dispatch 布局及幂等性、normal counts 两条传输路径、旧布局拒绝共 4 项测试通过。两组 E=18、capacity=256、N/K=4096/4096 与 4096/2048 的 GPU eager/变输入 Graph 对拍通过。全量 CPU 单测 254 项，12 failures、13 errors、29 skipped，失败集合与父提交完全一致，无新增失败；未执行本轮数据集精度。后续交接以 Markdown 为准，本轮不更新 HTML 导览。
+
+本轮 bs8 profile `1794965556.1609702` 完整保存 16 rank，各有 10 个 VERIFY bs8 和 940 次 pair32 BM128 cooperative GEMM。16 rank 平均整轮 80.847 ms、专家 GEMM 累计 16.367 ms/轮；整理前同包单次采样为 80.877/15.977 ms，未见明显整轮回退，但路由与有效上下文并非逐元素对齐，不能据此宣称加速或已达到参考 trace。采集后出现已知子进程 SIGSEGV，已启动同候选恢复。原始证据位于 `$AGENT_DIR/das-glm53-rebase-20261116/perf/gedf118-cleanup-20261118` 与相邻 `trace/gedf118-cleanup-20261118`。
+
+### 2026-11-18 最新主线 rebase 与提交整理
+
+基线更新为 HYGON-AI `origin/main@15c09173aeacc24216e330e9a52aa7eb8db042c6`，配套 Adapter 为 `master/main@1c9448e1b09514a8d1424ad0d50d70cb88a6d078`。两仓在原 `feat/glm5.3-flash` 分支回放本地改动；官方 SGLang 保持 `baa9befa381511cd4d56f83980951e5a45fffc6d`。保留上游新注册入口、环境字段与 hook guard，KDA 空 dispatcher 检查由上游实现接管，删除本地重复补丁。真实注册测试发现上游遗漏 `qwen3_5` 导入，补齐后整条注册、KDA Prefill/Decode/Verify 状态链通过。
+
+容器定向验证：MoE 16 项中 15 通过、1 跳过；KDA 7 项通过；gedf118 的两组专家 GEMM eager/变输入 Graph 对拍通过。Adapter 103 项及 6 个子测试通过；独立 SGLang 宿主下 dense INT8/桥接 24 项通过。CPU 全量为 268 项、18 failures、17 errors、29 skipped，失败标识均能在修改前或最新上游复现，不宣称全仓全绿；未重跑数据集精度。L0 通过。文档以 Markdown 为准，历史 HTML 重建提交不再回放。
+
+服务回归在 `f14r1n15/16`、`plugin-dev`、原 INT8/TP16/DP16/EP16 配方执行。满载至少 30 秒后采集 `1794967871.1547518`：16 rank 均有 10 个 VERIFY bs8 与 940 次 gedf118 pair32 cooperative GEMM。整轮均值 79.501 ms，专家 GEMM 累计 16.524 ms/轮；rebase 前分别为 80.847/16.367 ms，单次采样未见整轮回退，不作确定性加速结论。采集后再次出现既有 profiler SIGSEGV，使用同一候选恢复。证据目录为 `$AGENT_DIR/das-glm53-rebase-20261116/perf/rebase-squash-20261118` 和相邻 `trace/rebase-squash-20261118`。

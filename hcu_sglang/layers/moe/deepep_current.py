@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, List, NamedTuple, Optional, Tuple, Union
 
 from lightop.quant import per_token_quant_fp8, per_token_quant_int8
 
+from hcu_sglang.config import deepep_disable_recv_hook
 from hcu_sglang.utils.detection import is_hcu
 from sglang.srt.environ import envs
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
@@ -60,6 +61,7 @@ from sglang.srt.utils import (
     is_hip,
     is_npu,
     load_json_config,
+    print_info_once,
 )
 
 _is_hcu = is_hcu()
@@ -129,6 +131,7 @@ _DEEPEP_LL_DISPATCH_USES_QUANT_TYPE = (
     and use_deepep
     and (
         hasattr(Buffer.low_latency_dispatch, "_hcu_quant_type_dispatch")
+        or getattr(Buffer.low_latency_dispatch, "_hcu_accepts_quant_type", False)
         or "quant_type" in inspect.signature(Buffer.low_latency_dispatch).parameters
     )
 )
@@ -903,17 +906,20 @@ class _DeepEPDispatcherImplBase:
         if _is_npu:
             self._update_int8_quant_env()
 
+    def _uses_hcu_int8_dispatch(self) -> bool:
+        config = self.quant_config or {}
+        return _is_hcu and (
+            config.get("hcu_w4a8_int8_dispatch", False)
+            or config.get("hcu_w8a8_int8_dispatch", False)
+        )
+
     def _validate_and_adjust_dtype(self) -> None:
         """Validate dtype against hardware and adjust if necessary."""
         if (
-            _is_hcu
-            and self.deepep_output_dtype == DispatcherOutputDtype.INT8
-            and (
-                (self.quant_config or {}).get("hcu_w4a8_int8_dispatch", False)
-                or (self.quant_config or {}).get("hcu_w8a8_int8_dispatch", False)
-            )
+            self.deepep_output_dtype == DispatcherOutputDtype.INT8
+            and self._uses_hcu_int8_dispatch()
         ):
-            return  # The HCU DeepEP W4A8 kernels support INT8 communication.
+            return
         if _is_npu and self.deepep_output_dtype == DispatcherOutputDtype.FP8:
             from sglang.srt.hardware_backend.npu.utils import is_npu_arch35
 
@@ -1244,7 +1250,10 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         num_max_dispatch_tokens_per_rank: the actual batch size in the decoding engine should be less than 256
         https://github.com/deepseek-ai/DeepEP?tab=readme-ov-file#example-use-in-inference-decoding
         """
-        self.return_recv_hook = return_recv_hook
+        self.disable_recv_hook = deepep_disable_recv_hook()
+        self.return_recv_hook = return_recv_hook and not self.disable_recv_hook
+        if self.disable_recv_hook:
+            print_info_once("HCU DeepEP low-latency receive hook disabled")
         self.device_module = torch.get_device_module()
         self.quant_config = {}
         self._combine_input_ready_event = None
@@ -1259,7 +1268,7 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
                 "hcu_legacy_groupgemm": True,
             }
         super().set_quant_config(quant_config)
-        if _is_hcu and quant_config.get("hcu_w4a8_int8_dispatch", False):
+        if _is_hcu and not self.disable_recv_hook and quant_config.get("hcu_w4a8_int8_dispatch", False):
             self.return_recv_hook = True
         if (
             _is_hcu
@@ -1363,21 +1372,20 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         buffer = self._get_buffer()
         _deepep_precompile_tp_barrier()
         npu_mxfp_quantization_opts = self._get_npu_mxfp_quantization_kwargs(buffer)
+        int8_dispatch = self._uses_hcu_int8_dispatch()
+        w8a8_dispatch = _is_hcu and self.quant_config.get("hcu_w8a8_int8_dispatch", False)
+        if use_groupgemm and w8a8_dispatch and not _DEEPEP_LL_DISPATCH_USES_QUANT_TYPE:
+            raise RuntimeError("HCU INT8 DeepEP requires a vendor quant_type dispatcher")
         if (
             use_groupgemm
             and _DEEPEP_LL_DISPATCH_USES_QUANT_TYPE
             and (
                 not _hcu_deepgemm_is_selected()
-                # DeepEPMoE kept the HCU groupgemm kernels: vendor quant_type.
                 or self.quant_config.get("hcu_legacy_groupgemm", False)
-                or self.quant_config.get("hcu_w4a8_int8_dispatch", False)
-                or self.quant_config.get("hcu_w8a8_int8_dispatch", False)
+                or int8_dispatch
             )
         ):
-            if _is_hcu and (
-                self.quant_config.get("hcu_w4a8_int8_dispatch", False)
-                or self.quant_config.get("hcu_w8a8_int8_dispatch", False)
-            ):
+            if int8_dispatch:
                 packed_recv_hidden, self.packed_recv_count, self.handle, event, hook = (
                     _quant_type_dispatch(
                         buffer,

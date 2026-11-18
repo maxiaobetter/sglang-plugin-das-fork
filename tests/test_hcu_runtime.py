@@ -11,12 +11,79 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class HcuRuntimeTests(unittest.TestCase):
+    def test_glm5_decode_alt_stream_is_opt_in_and_hcu_only(self):
+        from types import SimpleNamespace
+
+        from hcu_sglang.config import (
+            GLM5_DISABLE_DECODE_ALT_STREAM_ENV,
+            glm5_decode_single_stream_enabled,
+        )
+
+        for enabled, mode, hcu, disabled in (
+            ("0", "decode", True, False),
+            ("1", "decode", True, True),
+            ("1", "prefill", True, False),
+            ("1", "null", True, False),
+            ("1", "decode", False, False),
+        ):
+            with self.subTest(enabled=enabled, mode=mode, hcu=hcu):
+                runtime = SimpleNamespace(
+                    get_disagg=lambda: SimpleNamespace(disaggregation_mode=mode)
+                )
+                with (
+                    patch.dict("os.environ", {GLM5_DISABLE_DECODE_ALT_STREAM_ENV: enabled}),
+                    patch.dict(sys.modules, {
+                        "sglang.srt.runtime_context": runtime,
+                        "hcu_sglang.utils.detection": SimpleNamespace(is_hcu=lambda: hcu),
+                    }),
+                ):
+                    self.assertEqual(glm5_decode_single_stream_enabled(), disabled)
+
+    def test_cold_hcu_detection_uses_adapter_metadata_without_cuda_properties(self):
+        import importlib.util
+        from types import SimpleNamespace
+
+        for arch, expected_hcu, expected_fp8 in (
+            ("gfx936", True, False), ("gfx938", True, True), ("gfx942", False, False),
+        ):
+            with self.subTest(arch=arch):
+                properties = Mock(side_effect=AssertionError("cold CUDA properties"))
+                torch = SimpleNamespace(version=SimpleNamespace(hip="6.4"), cuda=SimpleNamespace(
+                    is_initialized=lambda: False, get_device_properties=properties,
+                ))
+                modules = {"torch": torch, "hcu_adapter.hcu_env": SimpleNamespace(arch_name=lambda: arch)}
+                with patch.dict(sys.modules, modules):
+                    spec = importlib.util.spec_from_file_location("cold_detection", ROOT / "hcu_sglang/utils/detection.py")
+                    detection = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(detection)
+                    self.assertEqual(detection.is_hcu(), expected_hcu)
+                    self.assertEqual(detection.is_hcu_native_fp8_supported(), expected_fp8)
+                properties.assert_not_called()
+
+    def test_detection_keeps_standalone_and_initialized_property_paths(self):
+        import importlib.util
+        from types import SimpleNamespace
+
+        for initialized in (False, True):
+            with self.subTest(initialized=initialized):
+                properties = Mock(return_value=SimpleNamespace(gcnArchName="gfx938:sramecc+"))
+                torch = SimpleNamespace(version=SimpleNamespace(hip="6.4"), cuda=SimpleNamespace(
+                    is_initialized=lambda: initialized, get_device_properties=properties,
+                ))
+                with patch.dict(sys.modules, {"torch": torch, "hcu_adapter.hcu_env": None}):
+                    spec = importlib.util.spec_from_file_location("property_detection", ROOT / "hcu_sglang/utils/detection.py")
+                    detection = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(detection)
+                    self.assertTrue(detection.is_hcu())
+                    self.assertTrue(detection.is_hcu_native_fp8_supported())
+                self.assertEqual(properties.call_count, 2)
+
     def test_cold_import_keeps_startup_lightweight_and_uses_current_namespace(self):
         code = "import hcu_sglang,sys,json; print(json.dumps({'file':hcu_sglang.__file__,'loaded':[n for n in sys.modules if n.split('.')[0] in ['torch','aiter','sglang_hcu_plugin']]}))"
         report = json.loads(subprocess.check_output(
