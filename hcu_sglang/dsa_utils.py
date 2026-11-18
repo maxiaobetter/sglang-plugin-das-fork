@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+
+if TYPE_CHECKING:
+    from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+
 from functools import lru_cache
 from sglang.srt.layers.attention.dsa import utils as U
 from hcu_sglang.utils.detection import is_hcu
@@ -26,6 +31,11 @@ def should_remap_pd_dsa_seed_to_local_slots() -> bool:
             )
 
             return hcu_should_remap(get_glm5_next_runtime_args(), config)
+        if U.envs.SGLANG_HCU_GLM53_FP8_DECODE_NATIVE_OPS.get():
+            from hcu_sglang.layers.rotary import _glm53_fp8_model
+
+            if _glm53_fp8_model(config.hf_config):
+                return False
     return (
         (U.is_cuda() or U.is_hip())
         and U.envs.SGLANG_DSA_FUSE_TOPK.get()

@@ -54,6 +54,10 @@ def __init__(
     indexer_layer_ids: N.Optional[typing.Sequence[int]] = None,
     dcp_replicated: bool = False,
 ):
+    dcp_size = N.get_parallel().attn_dcp_size
+    hcu_sharded_draft = _is_hcu and dcp_size > 1 and dcp_replicated
+    if hcu_sharded_draft:
+        dcp_replicated = False
     override_dim = (
         kv_cache_dim if kv_cache_dim != kv_lora_rank + qk_rope_head_dim else None
     )
@@ -83,11 +87,20 @@ def __init__(
         f"page_size {self.page_size} must be a multiple of index_kpool {index_kpool}"
     )
     self.index_page_size = (
-        self.page_size if _is_hcu else self.page_size // index_kpool
+        self.page_size // dcp_size
+        if hcu_sharded_draft
+        else self.page_size if _is_hcu else self.page_size // index_kpool
     )
     layer_range = range(self.start_layer, self.start_layer + self.layer_num)
+    if skip_topk_layers is not None and len(skip_topk_layers) != self.layer_num:
+        raise ValueError("skip_topk_layers must have one entry per local layer")
     if indexer_layer_ids is None:
-        resolved_indexer_layer_ids = tuple(layer_range)
+        resolved_indexer_layer_ids = tuple(
+            layer_id
+            for layer_id in layer_range
+            if skip_topk_layers is None
+            or not skip_topk_layers[layer_id - self.start_layer]
+        )
     else:
         if len(indexer_layer_ids) != len(set(indexer_layer_ids)):
             raise ValueError("indexer_layer_ids must not contain duplicates")
@@ -121,17 +134,16 @@ def __init__(
     if dcp_replicated and not _is_hcu:
         self.index_page_size //= N.get_parallel().attn_dcp_size
     if index_buf_size is None:
-        dcp_size = N.get_parallel().attn_dcp_size
         index_buf_size = (
             size
-            if dcp_replicated
+            if dcp_replicated or hcu_sharded_draft
             else (size + self.page_size) * dcp_size - self.page_size
         )
     self.index_buf_size = index_buf_size
     # num head == 1 and head dim == 128 for index_k in DSA
     assert index_head_dim == 128
     self.index_k_cache_mode = K.resolve_index_k_cache_mode(
-        dtype, page_size, index_head_dim
+        dtype, self.index_page_size, index_head_dim
     )
     self.use_fp8_index_k_cache = (
         self.index_k_cache_mode is K.IndexKCacheMode.FP8_SCALED
@@ -259,7 +271,9 @@ def _create_index_k_buffer(self):
         self.index_k_buffer = [
             N.torch.zeros(
                 (
-                    num_pages,
+                    num_pages
+                    if self._should_allocate_index_layer(layer_id - self.start_layer)
+                    else 0,
                     self.page_size,
                     1,
                     self.index_head_dim,
@@ -267,7 +281,7 @@ def _create_index_k_buffer(self):
                 dtype=self.index_k_buffer_dtype,
                 device=self.device,
             )
-            for _ in range(self.indexer_layer_num)
+            for layer_id in self.indexer_layer_ids
         ]
 
 def _get_indexer_cache_index(self, layer_id: int) -> int:
