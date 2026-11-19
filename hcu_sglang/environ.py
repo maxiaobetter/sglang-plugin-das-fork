@@ -16,6 +16,13 @@ _ENV_SPECS: dict[str, tuple[type, Any]] = {
     "SGLANG_QWEN4_SPLIT_HC_MIX": (EnvBool, False),
     "SGLANG_QWEN4_FLAT_STATE_SCATTER": (EnvBool, False),
     "SGLANG_QWEN4_PREFILL_DIAGNOSTICS": (EnvBool, False),
+    "SGLANG_QWEN4_PREFILL_QSA_IMPL": (EnvStr, "triton"),
+    "SGLANG_HCU_QSA_PREFILL_LOGITS_MIB": (EnvInt, 0),
+    "SGLANG_HCU_QSA_PREFILL_KEY_SPAN": (EnvInt, 0),
+    "SGLANG_HCU_QSA_PREFILL_TP_ROWS": (EnvInt, 0),
+    "SGLANG_HCU_PD_PREFILL_DRAIN_MODE": (EnvStr, "off"),
+    "SGLANG_HCU_PREFILL_MIXED_TIMEOUT": (EnvBool, False),
+    "SGLANG_QWEN4_PLE_PREFILL_INPLACE_SILU": (EnvBool, False),
     "SGLANG_ENABLE_DP_GATHER_INT8": (EnvBool, False),
     "SGLANG_PLE_ETP_REDUCE_SCATTER": (EnvBool, True),
     "SGLANG_PLE_ETP_REDUCE_SCATTER_MIN_TOKENS": (EnvInt, 2048),
@@ -187,6 +194,8 @@ _HCU_DEFAULT_OVERRIDES: dict[str, tuple[type, Any]] = {
     "SGLANG_HACK_FLASHMLA_BACKEND": (EnvStr, "kernel"),
     "SGLANG_OPT_FP8_WO_A_GEMM": (EnvBool, False),
     "SGLANG_OPT_FUSE_MHC_POST_PRE": (EnvBool, False),
+    "SGLANG_HCU_FUSE_QKVZBA_VERIFY": (EnvBool, True),
+    "SGLANG_GDN_ZBA_STRIDED": (EnvBool, True),
 }
 
 

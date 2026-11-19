@@ -72,15 +72,8 @@ def register() -> None:
     from hcu_sglang.models import glm4_moe
     from hcu_sglang.models import minimax_m2
     from hcu_sglang.models import utils as model_utils
-    from hcu_sglang.multimodal_gen import attention as multimodal_attention
-    from hcu_sglang.multimodal_gen import config_compat as multimodal_config
-    from hcu_sglang.multimodal_gen import minimax_h3
-    from hcu_sglang.multimodal_gen import platform as multimodal_platform
-    from hcu_sglang.multimodal_gen import profiling
-    from hcu_sglang.multimodal_gen import qknorm_rope
-    from hcu_sglang.multimodal_gen import wan_sla
     from hcu_sglang.models.deepseek import register_hooks as register_deepseek
-    from hcu_sglang.models.qwen import qwen2, qwen3, qwen3_5, qwen3_moe
+    from hcu_sglang.models.qwen import qwen2, qwen3, qwen3_moe, qwen3_5
 
     jit_overlay_loader.register_hooks()
     configs.register_hooks()
@@ -95,6 +88,8 @@ def register() -> None:
     distributed.register_hooks()
     disaggregation.register_hooks()
     kernel_compat.register_hooks()
+    from hcu_sglang import sampling
+    sampling.register_hooks()
     hcu_mla_registry.register()
     base_backend.register_hooks()
     flashattention_backend.register()
@@ -207,13 +202,9 @@ def register() -> None:
     hunyuan_v4_hooks.register_hooks()
     glm4_moe.register_hooks()
     minimax_m2.register_hooks()
-    multimodal_platform.register_hooks()
-    multimodal_config.register_hooks()
-    profiling.register_hooks()
-    multimodal_attention.register_hooks()
-    minimax_h3.register_hooks()
-    qknorm_rope.register_hooks()
-    wan_sla.register_hooks()
+    from hcu_sglang.multimodal_gen import register_legacy
+
+    register_legacy()
     register_deepseek()
     from hcu_sglang.layers import glm53_decode
     glm53_decode.register_hooks()
@@ -226,4 +217,6 @@ def register() -> None:
     qwen4_exp.register_hooks()
     from hcu_sglang import speculative_dspark
     speculative_dspark.register_hooks()
+    from hcu_sglang.layers.gemm import hooks as gemm_hooks
+    gemm_hooks.register()
     logger.info("[hcu_sglang] optimization hooks registered")
