@@ -4355,3 +4355,14 @@ Adapter 仅补齐既有 sampling/grouped-topk 桥的导入档位说明，并验�
 容器定向验证：MoE 16 项中 15 通过、1 跳过；KDA 7 项通过；gedf118 的两组专家 GEMM eager/变输入 Graph 对拍通过。Adapter 103 项及 6 个子测试通过；独立 SGLang 宿主下 dense INT8/桥接 24 项通过。CPU 全量为 268 项、18 failures、17 errors、29 skipped，失败标识均能在修改前或最新上游复现，不宣称全仓全绿；未重跑数据集精度。L0 通过。文档以 Markdown 为准，历史 HTML 重建提交不再回放。
 
 服务回归在 `f14r1n15/16`、`plugin-dev`、原 INT8/TP16/DP16/EP16 配方执行。满载至少 30 秒后采集 `1794967871.1547518`：16 rank 均有 10 个 VERIFY bs8 与 940 次 gedf118 pair32 cooperative GEMM。整轮均值 79.501 ms，专家 GEMM 累计 16.524 ms/轮；rebase 前分别为 80.847/16.367 ms，单次采样未见整轮回退，不作确定性加速结论。采集后再次出现既有 profiler SIGSEGV，使用同一候选恢复。证据目录为 `$AGENT_DIR/das-glm53-rebase-20261116/perf/rebase-squash-20261118` 和相邻 `trace/rebase-squash-20261118`。
+
+## 2026-11-19 保留 INT8 DeepGEMM 显式关闭语义
+
+PR review 发现，在 HCU W8A8 INT8 MoE 同时使用 `deep_gemm` runner 和 `deepep`
+A2A backend 时，插件的 `requested()` 会忽略显式的
+`SGLANG_USE_DEEPGEMM_MOE=0`。现在先尊重该变量的显式 false 值；变量未设置时，
+仍由 HCU、runner 和 A2A backend 条件自动选择插件路径。增加 CPU 回归覆盖
+`0`、`false` 两种关闭值及未设置时的自动选择。
+
+`tests/test_hcu_runtime.py` 运行 10 项全部通过，L0 和离线导览快照检查通过。
+本次未执行 GPU、模型精度或性能验证。
