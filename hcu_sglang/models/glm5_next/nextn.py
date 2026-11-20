@@ -29,8 +29,10 @@ logger = logging.getLogger(__name__)
 
 
 class Glm5NextForConditionalGenerationNextN(DeepseekV3ForCausalLMNextN):
-    def forward(self, input_ids, positions, forward_batch, pp_proxy_tensors=None):
+    def prepare_forward_batch(self, forward_batch, *, input_ids=None):
         if not enable_cp_v2() and forward_batch.attn_cp_metadata is None:
+            if input_ids is None:
+                input_ids = forward_batch.input_ids
             parallel = get_parallel()
             if can_dsa_cp_split(
                 len(input_ids),
@@ -46,6 +48,9 @@ class Glm5NextForConditionalGenerationNextN(DeepseekV3ForCausalLMNextN):
                     extend_seqs_len=forward_batch.extend_seq_lens_cpu,
                     device=input_ids.device,
                 )
+
+    def forward(self, input_ids, positions, forward_batch, pp_proxy_tensors=None):
+        self.prepare_forward_batch(forward_batch, input_ids=input_ids)
         return super().forward(
             input_ids, positions, forward_batch, pp_proxy_tensors=pp_proxy_tensors
         )

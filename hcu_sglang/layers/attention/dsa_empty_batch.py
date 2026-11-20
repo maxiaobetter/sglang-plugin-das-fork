@@ -2,18 +2,25 @@ from hcu_sglang.utils.detection import is_hcu
 
 
 def around_init_forward_metadata(original, backend, batch):
-    import torch
     from sglang.srt.layers.attention.dsa_backend import DSAMetadata
 
     if not is_hcu() or batch.batch_size != 0 or not batch.forward_mode.is_target_verify():
         return original(backend, batch)
     if batch.seq_lens.numel() or batch.input_ids.numel():
         raise ValueError("Empty DSA verification batch contains tokens or lengths")
+    backend.forward_metadata = build_empty_verify_metadata(
+        DSAMetadata, backend.physical_page_size, backend.req_to_token_pool, batch
+    )
+
+
+def build_empty_verify_metadata(metadata_type, page_size, req_to_token_pool, batch):
+    import torch
+
     empty = batch.seq_lens.to(torch.int32)
     zero = torch.zeros(1, dtype=torch.int32, device=empty.device)
-    table = backend.req_to_token_pool.req_to_token[:0, :0]
-    backend.forward_metadata = DSAMetadata(
-        page_size=backend.physical_page_size,
+    table = req_to_token_pool.req_to_token[:0, :0]
+    return metadata_type(
+        page_size=page_size,
         cache_seqlens_int32=empty,
         max_seq_len_q=1,
         max_seq_len_k=0,

@@ -24,6 +24,7 @@ from sglang.srt.configs.model_config import (
 )
 from sglang.srt.environ import envs
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
+from hcu_sglang.layers.attention.dsa_empty_batch import build_empty_verify_metadata
 from hcu_sglang.layers.attention.glm5_next.dequant_k_cache import (
     dequantize_k_cache_paged,
 )
@@ -792,6 +793,18 @@ class NativeSparseAttnBackend(
             )
         return metadata
 
+    def _is_empty_kpool_verify(self, forward_batch: ForwardBatch) -> bool:
+        return (
+            _is_hcu
+            and self.dsa_index_kpool > 1
+            and self.dsa_decode_impl == "flashmla_kv"
+            and self.dsa_kv_cache_store_fp8
+            and forward_batch.forward_mode.is_target_verify()
+            and forward_batch.batch_size == 0
+            and forward_batch.seq_lens_cpu is not None
+            and forward_batch.seq_lens_cpu.numel() == 0
+        )
+
     def init_forward_metadata(self, forward_batch: ForwardBatch):
         """Init the metadata for a forward pass."""
         # A prefill worker can still see idle or non-CP forwards. Do not let a
@@ -805,6 +818,15 @@ class NativeSparseAttnBackend(
             )
             if configure_page_plan is not None:
                 configure_page_plan(None, forward_batch)
+
+        if self._is_empty_kpool_verify(forward_batch):
+            if forward_batch.seq_lens.numel():
+                raise ValueError("Empty KPool verification batch contains sequence lengths")
+            forward_batch.extend_seq_lens_cpu = []
+            self.forward_metadata = build_empty_verify_metadata(
+                DSAMetadata, self.real_page_size, self.req_to_token_pool, forward_batch
+            )
+            return
 
         batch_size = forward_batch.batch_size
         device = forward_batch.seq_lens.device
@@ -2001,6 +2023,8 @@ class NativeSparseAttnBackend(
         is_neox: Optional[bool] = False,
         llama_4_scaling: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if self._is_empty_kpool_verify(forward_batch):
+            return q.new_zeros((q.shape[0], 1, layer.tp_q_head_num, layer.v_head_dim))
 
         causal = not layer.is_cross_attention
         metadata = self.forward_metadata

@@ -4377,3 +4377,15 @@ A2A backend 时，插件的 `requested()` 会忽略显式的
 - 桌面快照 `5d5b739` 中的 DSA 注册由 #81 的工厂覆盖。mHC 首轮使用 rebased #81 中的原有分发和 `SGLANG_HCU_NATIVE_MHC` 门控。快照中的独立 mHC 导入改绑、KDA TileLang verify 和延迟提交由后续 profile 决定是否引入。
 
 静态证据为官方 0.5.22 `baa9befa` 的调度与 NextN 接口、固定源码差异，以及历史 AC 04:09、04:38 和 05:36 各次 rank trace 对应的 CP、e/h norm 与词表补丁。历史 trace 用于定位源码接缝。本地通过 Quality Gate 的 Ruff 0.12.1 规则、变更 Python 语法、L0 结构和导览快照检查。同镜像的 ABI 与全 rank prefill、decode、MTP、换输入 graph 重放、性能和端到端精度均待验证。
+
+### Flash NextN 的 prefill CP 规划顺序
+
+同一 zhiputx 镜像上的 `984a010` 在 CP8 interleave 的首次 MTP prefill 预热触发 KPool 行数断言。官方 0.5.22 eager runner 在调用 NextN forward 前完成 attention 规划。此时 batch 尚无旧版 CP metadata，KPool plan 使用 4096 行。NextN forward 随后创建 CP metadata 并分片，indexer 每 rank 接到 512 行。
+
+Flash NextN 通过 runner 的 `prepare_forward_batch` 接口，在 attention 规划前建立旧版 CP metadata。KPool planner 继续保留全序列压缩计划，为各 rank 生成局部 Q 的 TopK 计划。NextN forward 复用同一准备逻辑，覆盖 runner 清除旧版 CP metadata 后的调用。CP v2、DCP=1、KPool=4、FP8 布局和 Adapter ABI 沿用既有路径。变更后的组合运行与全 rank profile 待复验。
+
+### Flash KPool 的空批 Verify
+
+同一 zhiputx 镜像的原生 IFB eager 和独立 PD eager 均在 8 rank 的空批 `TARGET_VERIFY` 进入 DSA metadata 初始化，访问空 `seq_lens_cpu.max()` 后退出。Flash KPool 后端复用已有空批 DSA metadata 构造，在该分支保留空页表、零长度前缀和与调用方匹配的注意力输出形状。KPool indexer 已对空长度返回无效索引，空批无需规划或写入 cache。非空 Verify 继续走 KPool、LightOp gather 和 FlashMLA 分发。
+
+原生 Decode B 段的 8 个 rank 记录了 `flash_mla_dsa_decode_h64_splitkv_kernel`。TP0 同时记录 `decode_gather_and_up_convert_with_indices_kernel`，原生 Prefill TP0 记录 `fused_kpool_topk_transform_kernel<4, true>`。候选沿用现有 Flash KPool 实现和 Adapter ABI。此次接线修复的候选 GPU 验证、算子调用比对和同址换输入 graph 复验仍待执行。
