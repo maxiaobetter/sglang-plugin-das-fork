@@ -4454,3 +4454,5 @@ Flash 的文本架构走 GLM Next，已有 `SGLANG_HCU_GLM_CT_BF16_ROUTER` 的 G
 静态逐通道 FP8 权重和动态逐 token FP8 activation 上，可使用原有 BF16 `F.linear`
 路径。启动对照时设置 `SGLANG_HCU_GLM_CT_BF16_ROUTER=1`，核对 Verify、Draft 和
 Draft Extend 各 rank 的 router logits dtype、gate 符号、频次和重放结果。
+首轮捕获中 Draft 和 Draft Extend 命中 BF16，主 Verify 的模型构造传入多模态外层配置。
+从外层提取文本配置后复用同一套匹配条件，再核对三种重放路径。

@@ -28,6 +28,7 @@ _is_hcu = is_hcu()
 
 
 def _glm5_flash_channel_fp8_router(config, quant_config):
+    config = getattr(config, "text_config", None) or config
     if (
         not _is_hcu
         or getattr(config, "model_type", None) != "glm5_next_text"
