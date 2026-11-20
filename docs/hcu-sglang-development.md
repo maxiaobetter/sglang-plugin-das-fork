@@ -4442,3 +4442,15 @@ MQA logits 的 96 个窗口，候选与原生的完整内核符号、顺序、gr
 随后立即执行 AllGather。原生在这些窗口的拼接次数为 0。
 GLM 的 CP 缓存写入路径在 RoPE 末维为零且其余维度、dtype、设备均与 K 匹配时，
 直接将 K 交给原有的连续化与收集逻辑。需在相同的 CP8 输入上复验设备调用及缓存写入路径。
+
+### GLM-5.3 Flash Channel FP8 的 BF16 router
+
+在相同的 8-rank Decode graph 配方里，原生每次 Verify 使用 BF16 gate 特化 42 次。
+候选先用 42 次 tiny GEMM 生成 FP32 router logits，再命中 FP32 gate 特化。
+Flash 的文本架构走 GLM Next，已有 `SGLANG_HCU_GLM_CT_BF16_ROUTER` 的 GLM DSA
+判定未覆盖它。
+
+扩展现有 opt-in。在 HCU 的 GLM Next Flash 形状、KPool=4、零宽 RoPE、
+静态逐通道 FP8 权重和动态逐 token FP8 activation 上，可使用原有 BF16 `F.linear`
+路径。启动对照时设置 `SGLANG_HCU_GLM_CT_BF16_ROUTER=1`，核对 Verify、Draft 和
+Draft Extend 各 rank 的 router logits dtype、gate 符号、频次和重放结果。
