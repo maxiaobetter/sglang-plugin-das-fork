@@ -4,7 +4,7 @@ from sglang.srt.runtime_context import get_spec
 from hcu_sglang.utils.detection import is_hcu
 
 
-def _use_probabilities(worker):
+def uses_native_draft_probabilities(worker):
     if (
         not envs.SGLANG_HCU_GLM5_FLASH_DRAFT_PROBABILITIES.get()
         or worker.topk != 1
@@ -25,7 +25,7 @@ def _use_probabilities(worker):
 
 def _hook(fn):
     def around(original, worker, *args, **kwargs):
-        if _use_probabilities(worker):
+        if uses_native_draft_probabilities(worker):
             return fn(worker, *args, **kwargs)
         return original(worker, *args, **kwargs)
 

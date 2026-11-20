@@ -67,6 +67,7 @@ def after_capture_draft_graphs(_result, worker):
     ):
         return
 
+    from hcu_sglang.draft_probability import uses_native_draft_probabilities
     from hcu_sglang.layers.attention.glm5_next.dsa_backend import NativeSparseAttnBackend
     from sglang.srt.environ import envs
     from sglang.srt.model_executor.cuda_graph_config import (
@@ -80,9 +81,13 @@ def after_capture_draft_graphs(_result, worker):
     )
     from sglang.srt.utils import get_available_gpu_memory, log_info_on_rank0
 
+    mode = get_server_args().disaggregation_mode
     if (
         not isinstance(worker.draft_extend_attn_backend, NativeSparseAttnBackend)
-        or get_server_args().disaggregation_mode != "decode"
+        or (
+            mode != "decode"
+            and (mode != "null" or not uses_native_draft_probabilities(worker))
+        )
         or worker.device != "cuda"
         or check_cuda_graph_backend(Phase.DECODE, Backend.DISABLED)
         or get_model().model_impl == "mindspore"
