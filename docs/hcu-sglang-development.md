@@ -4389,3 +4389,14 @@ Flash NextN 通过 runner 的 `prepare_forward_batch` 接口，在 attention 规
 同一 zhiputx 镜像的原生 IFB eager 和独立 PD eager 均在 8 rank 的空批 `TARGET_VERIFY` 进入 DSA metadata 初始化，访问空 `seq_lens_cpu.max()` 后退出。Flash KPool 后端复用已有空批 DSA metadata 构造，在该分支保留空页表、零长度前缀和与调用方匹配的注意力输出形状。KPool indexer 已对空长度返回无效索引，空批无需规划或写入 cache。非空 Verify 继续走 KPool、LightOp gather 和 FlashMLA 分发。
 
 原生 Decode B 段的 8 个 rank 记录了 `flash_mla_dsa_decode_h64_splitkv_kernel`。TP0 同时记录 `decode_gather_and_up_convert_with_indices_kernel`，原生 Prefill TP0 记录 `fused_kpool_topk_transform_kernel<4, true>`。候选沿用现有 Flash KPool 实现和 Adapter ABI。此次接线修复的候选 GPU 验证、算子调用比对和同址换输入 graph 复验仍待执行。
+
+### Flash KDA Verify 的卷积更新
+
+候选 `beb634c5` 在 node16 的 PD Decode、full graph、batch size 1 的
+TARGET_VERIFY 捕获中退出。框架与插件的 KDA Verify 均会传入卷积中间窗口、
+状态索引和树形检索参数。HCU 单步 causal conv 的签名仅支持提交后的缓存更新。
+
+KDA 在注册包装器前保留框架 updater。含扩展参数的调用完整交给该 updater，
+HCU 单步路径继续使用现有算子。框架 updater 同时处理 HCU 算子关闭时的回退，
+避免通过已被覆盖的模块符号再次进入包装器。候选的 Graph Capture、8 rank
+A/B trace、同址换输入重放和调用层对齐待在原配方复验。

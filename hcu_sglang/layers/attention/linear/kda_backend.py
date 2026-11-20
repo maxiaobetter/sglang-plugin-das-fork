@@ -20,6 +20,7 @@ from hcu_sglang.layers.attention.linear import gdn_commit
 
 _hcu_causal_conv1d_fn = None
 _hcu_causal_conv1d_update = None
+_upstream_causal_conv1d_update = K.causal_conv1d_update
 _use_hcu_cc1d = is_hcu() and get_bool_env_var(
     "SGLANG_KDA_USE_CAUSAL_CONV1D_HCU", default="true"
 )
@@ -76,10 +77,11 @@ def _run_causal_conv1d_update(
     *,
     activation="silu",
     conv_state_indices=None,
+    **update_kwargs,
 ):
     """HCU uses the operator-library single-step causal conv; other platforms
     keep the sglang triton implementation (or its NPU/CPU overrides)."""
-    if _hcu_causal_conv1d_update is not None:
+    if _hcu_causal_conv1d_update is not None and not update_kwargs:
         return _hcu_causal_conv1d_update(
             x,
             conv_state,
@@ -88,13 +90,14 @@ def _run_causal_conv1d_update(
             activation=activation,
             conv_state_indices=conv_state_indices,
         )
-    return causal_conv1d_update(
+    return _upstream_causal_conv1d_update(
         x,
         conv_state,
         weight,
         bias,
         activation=activation,
         conv_state_indices=conv_state_indices,
+        **update_kwargs,
     )
 
 class _DispatcherMethods:
