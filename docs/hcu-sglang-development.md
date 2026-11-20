@@ -4456,3 +4456,19 @@ Flash 的文本架构走 GLM Next，已有 `SGLANG_HCU_GLM_CT_BF16_ROUTER` 的 G
 Draft Extend 各 rank 的 router logits dtype、gate 符号、频次和重放结果。
 首轮捕获中 Draft 和 Draft Extend 命中 BF16，主 Verify 的模型构造传入多模态外层配置。
 从外层提取文本配置后复用同一套匹配条件，再核对三种重放路径。
+
+### GLM-5.3 Flash KDA Verify 延迟提交与 Draft 概率
+
+原生 0.5.18 的 KDA Verify 在下一次 Verify 内折叠已接受的 ReplaySSM ring。
+候选使用原生 TileLang Verify 内核，并配对移植 pending 写入、slot 重用清零、
+普通 decode/extend 与 checkpoint copy 的 flush。当前配方使用静态 Mamba slot，
+关闭 Mamba tracking，Verify 为线性 top-1。HCU 的普通 Triton 路径继续处理
+未启用延迟提交的配方。延迟提交启用后，TileLang 拒绝该实参会中止请求。
+
+用 `SGLANG_KDA_USE_TILELANG_VERIFY=1` 和 `SGLANG_KDA_REPLAYSSM_DEFER_COMMIT=1`
+验证 HCU KDA ReplaySSM。用 `SGLANG_HCU_GLM5_FLASH_DRAFT_PROBABILITIES=1` 启用
+GLM-5.3 Flash 的非 rejection、非 VP top-1 概率路径。Draft 和 decode 后的
+Draft Extend 复用固定 0.5.22 worker 方法，将分支对齐到原生的
+`renorm_draft_probs` 和 `fast_topk`。Prefill 后的 Draft Extend 原本已走概率路径。
+8 卡需核对 kernel 模板及参数、pending 生命周期、三类 graph 同址换输入重放。
+性能和真实请求精度在调用对齐后另验。

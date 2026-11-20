@@ -9,6 +9,9 @@ from hcu_sglang.utils.detection import is_hcu
 
 
 _ENV_SPECS: dict[str, tuple[type, Any]] = {
+    "SGLANG_KDA_USE_TILELANG_VERIFY": (EnvBool, False),
+    "SGLANG_KDA_REPLAYSSM_DEFER_COMMIT": (EnvBool, False),
+    "SGLANG_HCU_GLM5_FLASH_DRAFT_PROBABILITIES": (EnvBool, False),
     "SGLANG_MOE_C_NATIVE_SORT": (EnvBool, False),
     "SGLANG_QWEN4_COMPACT_PREFILL": (EnvBool, False),
     "SGLANG_QWEN4_LOCAL_ROUTING": (EnvBool, False),
