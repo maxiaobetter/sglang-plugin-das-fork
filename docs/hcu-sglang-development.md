@@ -4419,4 +4419,17 @@ Q 量化，Q scale 仍乘入 logits head gate。保留 KPool 的缓存布局、
 候选 Prefill 容器的 `site.sh` 可导出 `SGLANG_HCU_DEEPEP_HIP_PAD_MASK=1`，
 使 HCU DeepEP + DeepGEMM 复用现有 HIP 补齐路径。默认值为 0。
 用原 4096 IDs 的候选复验检查每 rank 的 ID 填充和权重清零、首次 launch 几何、
-有效行数以及 DeepEP dispatch。该开关用于调用层对照，GPU 证据待采。
+有效行数以及 DeepEP dispatch。8 个 rank 的主 EXTEND 和 Draft Extend
+分别验证到 84 和 2 次填充，首次 grid 为 (512,1,1)，block 为 (256,1,1)。
+DeepEP dispatch 的次数及首次几何也与原生一致。逐行有效性尚待核对。
+
+### Flash FP8 KPool 的 head gate
+
+原生 HCU 使用 eager 路径执行 head gate 的 FP32 投影与缩放。组合运行时
+的 adapter 使插件所见的 `is_hip()` 返回假。候选 Prefill 的 8-rank
+trace 每个主阶段出现 11 次 Inductor 转换和 11 次融合乘法。
+生成代码先将输入转为 FP32，再投影并依次乘以头缩放、Q scale 和 softmax scale。
+
+Flash FP8 对照配方在启动前设置 `SGLANG_HCU_KPOOL_EAGER_HEAD_GATE=1`，
+使 KPool 的 head gate 及其嵌套投影复用已有 eager 方法。下一次采集核对
+MQA 前的转换、逐项乘法和输入类型。实际重放与端到端精度分别验收。

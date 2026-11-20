@@ -67,6 +67,9 @@ logger = logging.getLogger(__name__)
 _INT8_UNIFORM_STD = math.sqrt(127 * 128 / 3)
 _random_weight_simulation_logged = False
 _HCU_USE_INT8_MQA_LOGITS = envs.SGLANG_DSA_HCU_USE_INT8_MQA_LOGITS.get()
+_COMPILE_HEAD_GATES = not is_hip() and not (
+    is_hcu() and get_bool_env_var("SGLANG_HCU_KPOOL_EAGER_HEAD_GATE")
+)
 # Splitting a ragged MQA request adds one MQA + topk launch. Benchmarks on BW
 # show that an extra launch breaks even after it avoids roughly two million
 # logits cells of invalid K-prefix work.
@@ -274,7 +277,7 @@ class IndexerKPool(Indexer):
             )
             _random_weight_simulation_logged = True
 
-    @torch.compile(dynamic=True) if not is_hip() else lambda f: f
+    @torch.compile(dynamic=True) if _COMPILE_HEAD_GATES else lambda f: f
     def _project_and_scale_head_gates(self, x: torch.Tensor):
         # Reuse the parent's FP32 weights_proj path; only difference is the
         # GLM head broadcast below.
@@ -283,7 +286,7 @@ class IndexerKPool(Indexer):
         weights = weights * self.n_heads**-0.5
         return weights
 
-    @torch.compile(dynamic=True) if not is_hip() else lambda f: f
+    @torch.compile(dynamic=True) if _COMPILE_HEAD_GATES else lambda f: f
     def _get_logits_head_gate(self, x: torch.Tensor, q_scale: torch.Tensor):
         # Override so the GLM head broadcast in _project_and_scale_head_gates
         # is picked up here too (parent inlines the projection instead of
@@ -292,7 +295,7 @@ class IndexerKPool(Indexer):
         weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale
         return weights
 
-    @torch.compile(dynamic=True) if not is_hip() else lambda f: f
+    @torch.compile(dynamic=True) if _COMPILE_HEAD_GATES else lambda f: f
     def _get_bf16_logits_head_gate(self, x: torch.Tensor):
         # BF16 logits path mirrors dsa_indexer.py: q is not FP8-quantized, so
         # there is no q_scale term. The MQA kernels consume dense fp32 weights.
