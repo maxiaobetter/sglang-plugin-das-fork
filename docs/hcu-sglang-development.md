@@ -4184,3 +4184,29 @@ GLM Channel FP8 HiSparse 的 unfused TopK 复用 HCU 原生 `sgl_kernel.fast_top
 单服务 IFB 的 PP1/DCP1 路径复用框架的 prefill staging。Prefill 在 DCU 写入 packed FP8 KV，完成后经 host pool 备份进入 HiSparse decode 队列。PD decode 的传输后端校验仅在 PD decode 生效。单请求的 prefill 容量取决于 DCU KV 池，增大 host/device ratio 不会增大该池。
 
 在用户 fork `85c1b05` 的 attention DP8/EP8 实例上，5/1/6 完成四条真实对话。按 DP rank 路由的 8 条 128-token 输入和两波共 16 条 4,608-token 输入，输出 token、EAGLE verify 与接受统计和原生逐条一致。三种较小 draft 宽度覆盖参数检查及既有 swap-in 组件验证。1M 请求在当前八卡环境受单 rank prefill 设备池容量限制。
+
+## 2026-11-20 GLM-5.3 LayerSplit 的 Index-K 容量预算
+
+从 [sglang-das #67](https://github.com/maxiaobetter/sglang-das/pull/67) 迁入
+`PP1`、`DCP1`、Prefill CP LayerSplit 与单层 EAGLE 的预算修正。插件在
+宿主完成池配置器初始化后，按每个 CP rank 的实际 target/draft 层和
+Index-K 层计费，再取最大值。Main-KV scratch 共用一份，两个 Index-K
+scratch 以及各自的 INT8 workspace 按分配情况计入预算。
+
+官方 v0.5.22 的 LayerSplit 查询仅用于 target。使用共享池的 GLM-5.3 draft
+沿用 target 池的 CP rank 和规模，将单层 draft 的 owner 移到最后一个 CP rank。
+本轮验证范围为本地 lint、语法及结构检查。节点上的实际容量与显存占用待验证。
+
+## 2026-11-20 GLM-5.3 HiCache L2 的 Index-K 层号映射
+
+参考 [sglang-das #34](https://github.com/maxiaobetter/sglang-das/pull/34)，
+GLM-5.3 的 L2 Index-K host pool 沿用官方 v0.5.22 的调度和搬运。声明按
+PP stage 内的模型层号筛选传输层，读写时将层号映射到实际的紧凑设备
+buffer。host 仍只保存本 CP rank 持有的活动层，packed draft 使用宿主
+分配的尾部位置。没有 Index-K 的 shard 跳过内存注册和搬运。FP8/INT8
+沿用现有 packed 字节，BF16 使用同一存储的字节视图。
+
+PD Decode 已有普通 Radix 前缀匹配、加锁、页对齐和后缀传输。结合 HiCache
+命中时，命中部分的 Index-K 由缓存保留或从 host 恢复。框架 #39 的
+EAGLE/NextN 启动放行与首个 forward 后的 prompt 入树仍待迁移。
+本轮只执行本地 lint、语法和结构检查，L2 搬运与 Decode 命中待实机核对。
