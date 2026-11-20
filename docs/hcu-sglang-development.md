@@ -4170,3 +4170,17 @@ EP 规模，插件将其和实际专家并行规模核对。旧权重缺少该�
 CPU 回归覆盖布局生成与复用、EP 规模相同与不匹配、旧权重兼容、
 布局后缀检查、写入失败后的恢复及并发发布。运行时校验在 CPU
 模拟 HIP 上下文中执行，当前未做设备推理或吞吐复测。
+
+## 2026-11-19 GLM-5.3 FP8 HiSparse FlashMLA
+
+在 SGLang v0.5.22 候选上，GLM-5.3 Channel FP8 HiSparse 的 prefill 与 decode 后端统一解析为 `flashmla_kv`。packed FP8 KV 写入复用现有 LightOp 路径。线性 EAGLE 支持 `2/1/3`、`3/1/4`、`4/1/5`、`5/1/6`。参数按 steps、EAGLE top-k、draft tokens 排列。Decode graph 捕获时把 MTP 的有效请求数置零，replay 由框架写入实际请求数。
+
+框架基线为 `baa9bef`，需要同步回移原生 HCU 的 spec swap 模板、host pointer 映射和 workspace 上限。四种宽度均在 gfx938 通过 656 B/token 的 swap-in 组件验证，共 16 次 eager 和 24 次 A/B/A 同址 graph replay。5/1/6 的 fake PD 整模在 8 rank 跑过短输入和两组不同长输入，共 24 条请求。该次 fake PD 验证覆盖调用链和同址 graph 回放。
+
+整模 smoke 暴露了 adapter 单层 MLA 预装载的跨设备索引问题。adapter 需要使用 mapped pinned host pointer 进行 656-byte 原始行搬运。候选首波 8 rank profile 命中与原生相同的 FlashMLA、packed 写入和 spec gather/commit 符号，计划拷贝的 block 上限已从 1024 收到原生的 256，补采 trace 在 8/8 rank 确认了 256-block 计划拷贝。target verify 每次 graph 的三个目标调用族计数与原生一致，运行总 graph 次数及部分阶段分布有差异。
+
+GLM Channel FP8 HiSparse 的 unfused TopK 复用 HCU 原生 `sgl_kernel.fast_topk`。短序列按 token 位置输出有效索引并以 -1 填充，保留 FlashMLA 的归约顺序。
+
+单服务 IFB 的 PP1/DCP1 路径复用框架的 prefill staging。Prefill 在 DCU 写入 packed FP8 KV，完成后经 host pool 备份进入 HiSparse decode 队列。PD decode 的传输后端校验仅在 PD decode 生效。单请求的 prefill 容量取决于 DCU KV 池，增大 host/device ratio 不会增大该池。
+
+在用户 fork `85c1b05` 的 attention DP8/EP8 实例上，5/1/6 完成四条真实对话。按 DP rank 路由的 8 条 128-token 输入和两波共 16 条 4,608-token 输入，输出 token、EAGLE verify 与接受统计和原生逐条一致。三种较小 draft 宽度覆盖参数检查及既有 swap-in 组件验证。1M 请求在当前八卡环境受单 rank prefill 设备池容量限制。
