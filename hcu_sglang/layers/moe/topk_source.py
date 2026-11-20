@@ -143,6 +143,7 @@ _is_xpu = is_xpu()
 _is_npu = is_npu()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 _use_deepgemm_moe = get_bool_env_var("SGLANG_USE_DEEPGEMM_MOE")
+_use_deepep_hip_pad_mask = get_bool_env_var("SGLANG_HCU_DEEPEP_HIP_PAD_MASK", "false")
 _is_musa = is_musa()
 _use_lightop = get_bool_env_var("SGLANG_USE_LIGHTOP")
 _use_lightop_topk_ids_postprocess = get_bool_env_var(
@@ -2647,11 +2648,12 @@ def _post_process_topk_ids(
     recorder_was_fused = False
     # HCU W8A8 deployments can select DeepGEMM through the legacy env while
     # the global runner backend remains AUTO, so recognize both selectors.
-    skip_deepep_padded_tokens = (
+    hcu_deepep_deepgemm = (
         _is_hcu
         and get_moe_a2a_backend().is_deepep()
         and (get_moe_runner_backend().is_deep_gemm() or _use_deepgemm_moe)
     )
+    skip_deepep_padded_tokens = hcu_deepep_deepgemm and not _use_deepep_hip_pad_mask
     hip_deepep_postprocessed = False
     _fold_pad_weights_into_append = False
     log2phy_prob = None
@@ -2676,7 +2678,7 @@ def _post_process_topk_ids(
                 if dispatch_algorithm == "load_aware"
                 else lplb_solver.solve(lp_routed_ids)
             )
-    if _is_cuda and not skip_deepep_padded_tokens:
+    if _is_cuda and not hcu_deepep_deepgemm:
         # LP path: solve LP outside torch.compile (the solver contains an
         # EP all-reduce that can't run inside compiled regions).
         if log2phy_prob is not None:
@@ -2714,7 +2716,7 @@ def _post_process_topk_ids(
                     else num_token_non_padded
                 ),
             )
-    elif _is_hip or skip_deepep_padded_tokens:
+    elif _is_hip or hcu_deepep_deepgemm:
         # On AMD HIP the aiter MoE kernels do not handle topk_ids=-1 safely
         # (negative indices cause illegal memory access). Keep their padded IDs
         # in range and zero their weights below. HCU DeepEP + DeepGEMM instead
@@ -2907,7 +2909,7 @@ def _post_process_topk_ids(
         # including appended shared slots, is omitted by DeepEP dispatch.
         _mask_topk_ids_padded_region(topk_ids, num_token_non_padded, fill_value=-1)
     elif (
-        _is_hip
+        (_is_hip or hcu_deepep_deepgemm)
         and not skip_deepep_padded_tokens
         and not _skip_hip_pad_mask
         and not _fold_pad_weights_into_append

@@ -4409,3 +4409,14 @@ paged MQA 拒绝了 INT8 KPool 缓存与 BF16 Q 的组合。双流 Verify
 Q 量化，Q scale 仍乘入 logits head gate。保留 KPool 的缓存布局、
 双流同步与 Prefill 的 Q/weights 分发。全 rank Decode/MTP 调用和
 同址换输入重放待复验。
+
+### Flash Prefill 的 DeepEP 补齐路由对照
+
+原生 HIP 路径先把补齐行的逻辑专家 ID 置为 0，在专家映射及共享专家处理后
+清零这些行的路由权重。Flash FP8 候选的 HCU DeepEP + DeepGEMM 路径
+用无效专家 ID 跳过补齐行，Prefill trace 的对应填充符号次数不同。
+
+候选 Prefill 容器的 `site.sh` 可导出 `SGLANG_HCU_DEEPEP_HIP_PAD_MASK=1`，
+使 HCU DeepEP + DeepGEMM 复用现有 HIP 补齐路径。默认值为 0。
+用原 4096 IDs 的候选复验检查每 rank 的 ID 填充和权重清零、首次 launch 几何、
+有效行数以及 DeepEP dispatch。该开关用于调用层对照，GPU 证据待采。
