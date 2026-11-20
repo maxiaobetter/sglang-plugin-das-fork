@@ -1532,31 +1532,22 @@ class IndexerKPool(Indexer):
 
         # (2) Run tail/compress on the alt stream while the current stream
         # prepares the platform-specific query representation and head-gate
-        # weights for paged top-k (BF16 on HCU, FP8 elsewhere).
+        # weights for paged top-k (INT8 on HCU, FP8 elsewhere).
         if enable_dual_stream:
             current_stream = torch.cuda.current_stream()
             self.alt_stream.wait_stream(current_stream)
             if return_indices:
                 if is_hcu():
-                    q_index = query
-                    weights = self._get_bf16_logits_head_gate(x)
+                    q_index, q_scale = per_token_quant_int8(query)
                 else:
                     q_index, q_scale = act_quant(query, self.block_size, self.scale_fmt)
-                    weights = self._get_logits_head_gate(x, q_scale)
+                weights = self._get_logits_head_gate(x, q_scale)
             with torch.cuda.stream(self.alt_stream):
                 _compress_write()
             current_stream.wait_stream(self.alt_stream)
         else:
             _compress_write()
             if return_indices:
-                # if is_hcu():
-                #     q_index = query
-                #     weights = self._get_bf16_logits_head_gate(x)
-                # else:
-                #     q_index, q_scale = act_quant(
-                #         query, self.block_size, self.scale_fmt
-                #     )
-                #     weights = self._get_logits_head_gate(x, q_scale)
                 q_index, q_scale = per_token_quant_int8(query)
                 weights = self._get_logits_head_gate(x, q_scale)
 
@@ -1772,9 +1763,10 @@ class IndexerKPool(Indexer):
             current_stream = torch.cuda.current_stream()
             self.alt_stream.wait_stream(current_stream)
             if is_hcu():
-                q_index = query
-                weights = self._get_bf16_logits_head_gate(x)
-                if overlap_prefill:
+                if overlap_decode:
+                    q_index, q_scale = per_token_quant_int8(query)
+                    weights = self._get_logits_head_gate(x, q_scale)
+                else:
                     q_index, weights = self._prepare_hcu_prefill_q_and_logits_head_gate(
                         query, x
                     )

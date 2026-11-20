@@ -4400,3 +4400,12 @@ KDA 在注册包装器前保留框架 updater。含扩展参数的调用完整�
 HCU 单步路径继续使用现有算子。框架 updater 同时处理 HCU 算子关闭时的回退，
 避免通过已被覆盖的模块符号再次进入包装器。候选的 Graph Capture、8 rank
 A/B trace、同址换输入重放和调用层对齐待在原配方复验。
+
+### Flash KPool 双流 Paged MQA 的 Q 量化
+
+候选 `cf83b7f` 在 node16 继续进入 TARGET_VERIFY 捕获，LightOp
+paged MQA 拒绝了 INT8 KPool 缓存与 BF16 Q 的组合。双流 Verify
+以及普通双流 Decode 使用与现有单流 HCU 路径相同的 per-token INT8
+Q 量化，Q scale 仍乘入 logits head gate。保留 KPool 的缓存布局、
+双流同步与 Prefill 的 Q/weights 分发。全 rank Decode/MTP 调用和
+同址换输入重放待复验。
