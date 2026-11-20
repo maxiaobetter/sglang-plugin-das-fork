@@ -4088,3 +4088,10 @@ EAGLE 需要 PP1、attnCP1、DP attention，attention TP 与 DCP 均为 4
 且组内 rank 一致。DCP 运行时关闭 prefill CP、fused DSA top-k、
 HiSparse、HiCache 和 symmetric memory。首次实机复验应核对同步上游后
 首次 draft 的 TopK 接线，再对照原生采集调用和换输入 Graph replay。
+
+DCP4 的 EAGLE 启动校验读取实际生效的 DP attention 状态。用
+`--attn-dp-size 2` 启动时，旧的 `enable_dp_attention` 参数仍可能为
+False，导致已启用 DP attention 的配方被拒绝。在 `85c1b05` 基线上
+应用此补丁后，两节点 DCP4 服务完成 target verify、draft decode 和
+draft extend 的 full Graph 捕获，三条真实对话均返回预期答案。
+该结果覆盖启动和小样本对话。
