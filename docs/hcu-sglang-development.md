@@ -4431,5 +4431,14 @@ trace 每个主阶段出现 11 次 Inductor 转换和 11 次融合乘法。
 生成代码先将输入转为 FP32，再投影并依次乘以头缩放、Q scale 和 softmax scale。
 
 Flash FP8 对照配方在启动前设置 `SGLANG_HCU_KPOOL_EAGER_HEAD_GATE=1`，
-使 KPool 的 head gate 及其嵌套投影复用已有 eager 方法。下一次采集核对
-MQA 前的转换、逐项乘法和输入类型。实际重放与端到端精度分别验收。
+使 KPool 的 head gate 及其嵌套投影复用已有 eager 方法。使用同一份 4096-token 输入，
+8 个 rank 各采到 11 个主 EXTEND 窗口和 1 个 Draft Extend 窗口。从 INT8 量化到
+MQA logits 的 96 个窗口，候选与原生的完整内核符号、顺序、grid 和 block 均一致。
+
+### GLM CP 收集零宽 RoPE 的 KV
+
+在 CP8 interleave 的同一份 Prefill 里，每个 rank 的主 EXTEND 和 Draft Extend
+分别有 11 次和 1 次 `aten::cat` 将 `[512, 1, 512]` 与 `[512, 1, 0]` 沿末维拼接，
+随后立即执行 AllGather。原生在这些窗口的拼接次数为 0。
+GLM 的 CP 缓存写入路径在 RoPE 末维为零且其余维度、dtype、设备均与 K 匹配时，
+直接将 K 交给原有的连续化与收集逻辑。需在相同的 CP8 输入上复验设备调用及缓存写入路径。

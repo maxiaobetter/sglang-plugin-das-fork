@@ -2077,7 +2077,14 @@ class NativeSparseAttnBackend(
 
                     # GLM CP uses the same metadata for MLA KV and hidden-state gathers.
                     nope_dim = k.shape[-1]
-                    latent = k if k_rope is None else torch.cat((k, k_rope), dim=-1)
+                    if k_rope is None or (
+                        k_rope.shape == (*k.shape[:-1], 0)
+                        and k_rope.dtype == k.dtype
+                        and k_rope.device == k.device
+                    ):
+                        latent = k
+                    else:
+                        latent = torch.cat((k, k_rope), dim=-1)
                     latent = cp_all_gather_rerange_output(
                         latent.flatten(1).contiguous(),
                         get_parallel().attn_cp_size,
