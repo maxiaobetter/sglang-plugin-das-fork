@@ -1021,7 +1021,10 @@ class ModelNextModel(nn.Module):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
-                enable_tp=not is_dp_attention_enabled(),
+                enable_tp=not (
+                    is_dp_attention_enabled()
+                    or (_is_hcu and envs.SGLANG_ENABLE_EMBED_REPLICATION.get())
+                ),
             )
         else:
             self.embed_tokens = PPMissingLayer()

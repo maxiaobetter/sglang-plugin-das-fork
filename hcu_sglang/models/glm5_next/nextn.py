@@ -15,13 +15,41 @@
 import logging
 
 from sglang.srt.models.deepseek_nextn import DeepseekV3ForCausalLMNextN
-from hcu_sglang.models.glm5_next.model import Glm5NextForCausalLM
 from sglang.srt.models.utils import WeightsMapper
+from sglang.srt.runtime_context import get_parallel
+
+from hcu_sglang.dsa_utils import can_dsa_cp_split
+from hcu_sglang.models.deepseek.current_v4.hcu_backend.hcu_cp_utils import (
+    prepare_context_parallel_metadata,
+)
+from hcu_sglang.models.deepseek.deepseek_nextn.methods.model import enable_cp_v2
+from hcu_sglang.models.glm5_next.model import Glm5NextForCausalLM
 
 logger = logging.getLogger(__name__)
 
 
 class Glm5NextForConditionalGenerationNextN(DeepseekV3ForCausalLMNextN):
+    def forward(self, input_ids, positions, forward_batch, pp_proxy_tensors=None):
+        if not enable_cp_v2() and forward_batch.attn_cp_metadata is None:
+            parallel = get_parallel()
+            if can_dsa_cp_split(
+                len(input_ids),
+                parallel.attn_cp_size,
+                self.model.decoder.self_attn.use_dsa,
+                forward_batch,
+            ):
+                forward_batch.attn_cp_metadata = prepare_context_parallel_metadata(
+                    len(input_ids),
+                    parallel.attn_cp_rank,
+                    parallel.attn_cp_size,
+                    forward_batch.seq_lens_cpu.tolist(),
+                    extend_seqs_len=forward_batch.extend_seq_lens_cpu,
+                    device=input_ids.device,
+                )
+        return super().forward(
+            input_ids, positions, forward_batch, pp_proxy_tensors=pp_proxy_tensors
+        )
+
     def prepare_cp_inputs(self, forward_batch, **kwargs):
         # The worker has rotated the target's multimodal embeddings per request.
         # Fill each appended token while indices still address full sequences,

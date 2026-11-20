@@ -101,7 +101,7 @@ class LazySlimQuantCompressedTensorsMarlinConfig(metaclass=_LazyCompressedConfig
         return None
 
 
-def install_quantization_method() -> bool:
+def install_quantization_method(*, check_conflicts: bool = True) -> bool:
     quantization = sys.modules.get("sglang.srt.layers.quantization")
     if quantization is None:
         return False
@@ -118,7 +118,7 @@ def install_quantization_method() -> bool:
             quantization.QUANTIZATION_METHODS,
         ):
             existing = registry.get(name)
-            if existing is not None and existing is not config:
+            if check_conflicts and existing is not None and existing is not config:
                 raise RuntimeError(
                     f"Quantization {name!r} is already registered by {existing!r}; "
                     "disable the other provider. With hcu-adapter, set "
@@ -144,17 +144,18 @@ def install_quantization_method() -> bool:
 def around_get_quantization_config(
     original: Callable[..., Any], quantization: str
 ):
-    install_quantization_method()
+    install_quantization_method(check_conflicts=quantization in _HCU_QUANTIZATION_NAMES)
     return original(quantization)
 
 
 def around_verify_quantization(original: Callable[..., Any], model_config):
-    install_quantization_method()
     requested = getattr(model_config, "quantization", None)
     if requested is None:
         checkpoint_config = model_config._parse_quant_hf_config() or {}
         requested = checkpoint_config.get("quant_method")
-    if requested not in _HCU_QUANTIZATION_NAMES:
+    use_hcu_quantization = requested in _HCU_QUANTIZATION_NAMES
+    install_quantization_method(check_conflicts=use_hcu_quantization)
+    if not use_hcu_quantization:
         return original(model_config)
 
     module = sys.modules.get("sglang.srt.configs.model_config")

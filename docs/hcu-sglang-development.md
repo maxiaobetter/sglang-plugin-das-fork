@@ -4366,3 +4366,14 @@ A2A backend 时，插件的 `requested()` 会忽略显式的
 
 `tests/test_hcu_runtime.py` 运行 10 项全部通过，L0 和离线导览快照检查通过。
 本次未执行 GPU、模型精度或性能验证。
+
+## 2026-11-20 GLM-5.3 Flash Channel FP8 的 KPool 接入
+
+本地分支基于 fork-main `66a35b6`，重放 PR #81 的 `cc21389` 和 `b43bb9e` 为 `3ccf79c` 和 `992bd5f`。首轮 Flash 使用 DCP=1，保留 #81 的 target/draft DSA 工厂、KPool、LayerSplit、P/D 及 NoPE KV writer 回退。64-token KV 页对应 16 个压缩 index slots。普通 GLM-5.3 的 DCP draft 槽号与 graph padding 继续由 fork 路径处理。#88 的 INT8 打包和 GEMM 保留配对，#81 的 DeepGEMM 显式关闭仍适用于 INT8 选择。
+
+- 旧版 prefill CP 在 Flash NextN 可分片且 batch 尚无 CP metadata 时复用现有 metadata 构造器。CP v2 和已准备好的 batch 沿用各自路径。
+- Flash KPool=4 的 NextN 分别调用 e/h RMSNorm。target 读取与 draft 相同的 `SGLANG_ENABLE_EMBED_REPLICATION` 开关。开启后两端使用完整词表，默认仍由现有 DP attention 条件决定。
+- 标准 Channel FP8 检查点使用框架的 compressed-tensors 配置。SlimQuant 注册冲突在显式或检查点选中相应量化时检查，FP8 加载沿用现有权重和 scale 路径。
+- 桌面快照 `5d5b739` 中的 DSA 注册由 #81 的工厂覆盖。mHC 首轮使用 rebased #81 中的原有分发和 `SGLANG_HCU_NATIVE_MHC` 门控。快照中的独立 mHC 导入改绑、KDA TileLang verify 和延迟提交由后续 profile 决定是否引入。
+
+静态证据为官方 0.5.22 `baa9befa` 的调度与 NextN 接口、固定源码差异，以及历史 AC 04:09、04:38 和 05:36 各次 rank trace 对应的 CP、e/h norm 与词表补丁。历史 trace 用于定位源码接缝。本地通过 Quality Gate 的 Ruff 0.12.1 规则、变更 Python 语法、L0 结构和导览快照检查。同镜像的 ABI 与全 rank prefill、decode、MTP、换输入 graph 重放、性能和端到端精度均待验证。
