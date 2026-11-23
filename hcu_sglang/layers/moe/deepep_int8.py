@@ -185,7 +185,7 @@ def forward_groupgemm_w8a8_int8_contiguous(
             dtype=torch.int32,
             pin_memory=True,
             device="cpu",
-        ).cuda(non_blocking=True)
+        ).to(device=hidden_states_device, non_blocking=True)
 
     counts_are_aligned = all(
         count % 256 == 0 for count in num_recv_tokens_per_expert
@@ -334,6 +334,7 @@ def forward_groupgemm_w8a8_int8_masked(
             masked_m.contiguous(),
             expected_m,
             shuffle_unique=0,
+            config={"MODE": 1001},
         )
     else:
         from deepgemm.m_group_gemm import m_grouped_w8a8_gemm_nt_masked_ll
@@ -397,6 +398,7 @@ def forward_groupgemm_w8a8_int8_masked(
             masked_m.contiguous(),
             expected_m,
             shuffle_unique=0,
+            config={"MODE": 1001},
         )
     else:
         w2_weight_int8 = (self.w2_weight_deepgemm, self.w2_weight_scale)
@@ -412,13 +414,19 @@ def forward_groupgemm_w8a8_int8_masked(
 
 
 def configure_layer(layer, quant_config):
-    from hcu_sglang.utils.detection import is_hcu
-    from sglang.srt.utils import get_bool_env_var
-    layer.use_int8_w8a8_deepgemm = is_hcu() and get_bool_env_var("SGLANG_USE_DEEPGEMM_MOE") and _is_w8a8_int8_deepgemm_quant(layer, quant_config)
+    from hcu_sglang.layers.moe.deepgemm_int8 import requested
+
+    layer.use_int8_w8a8_deepgemm = requested() and _is_w8a8_int8_deepgemm_quant(
+        layer, quant_config
+    )
     if layer.use_int8_w8a8_deepgemm:
         layer.use_int8_w8a8_deepgemm_asm = use_int8_deepgemm_asm()
         layer.use_pair32_w8a8_int8_deepgemm = is_hcu_pair32_int8() and not layer.use_int8_w8a8_deepgemm_asm
         layer.use_w8a8_marlin = False
+        layer.dispatcher.set_quant_config({
+            **(getattr(layer.dispatcher, "quant_config", None) or {}),
+            "hcu_w8a8_int8_dispatch": True,
+        })
 
 
 def run_moe_core(layer, dispatch_output):

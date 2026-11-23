@@ -224,3 +224,58 @@ prepare 在 KV norm 前判定资格，保留 Q norm、projection、indexer 和 a
 显式选中路径要求 LightOp 同时提供包装层、对应原生符号和 Q head stride 256 支持。缺失时明确报错；进入融合后若 Q geometry 或交换合同不符，不改用另一算法掩盖错误。每行保持 656 byte/164 int32 word，FP8 KV scale 固定沿原生参数，禁止浮点搬运、重复量化或改变 TopK 顺序。来源与分阶段验证边界见 [开发记录](hcu-sglang-development.md#2026-11-12-glm53-fp8-prefix-kv-producer-本地候选)。
 
 目前为未部署的本地接线候选。已有真实目标输入的八 rank 融合叶子与独立 store 数学证据，不等于候选 helper、实际八 rank collective、正式模型分发或完整精度通过；这些验收分别记录。
+
+## 15. GLM-5.3 Channel FP8 的 prefill 组合开关
+
+`SGLANG_GLM_OPT_PREFILL=1` 在满足模型、输入和供应商扩展条件时启用
+packed KV、physical KV compact、Add RMS align16、K1 indirect 和 EP K8
+gather。各项显式开关和构建产物要求见前面的对应小节。
+
+`SGLANG_GLM_PREFILL_SHARED_OVERLAP=1` 独立启用 eager prefill 的共享专家旁流。
+Normal DeepEP 提交 routed FP8 量化后记录事件，旁流等待该事件后执行共享专家，
+主流在合并输出前等待旁流结束。两个开关默认关闭。
+## GLM5-Next Decode 辅助流诊断
+
+`HCU_PLUGIN_GLM5_DISABLE_DECODE_ALT_STREAM` 是 Plugin 的 worker 环境变量，默认 `0`。在 HCU Decode 启动前设为 `1`，Plugin 在主模型和 Draft NextN 构造时跳过创建 `alt_stream`。回退时取消设置或设回 `0`，重启 Decode。
+
+Prefill、其他模型、Adapter 平台判定和 HIP Graph 运行时的流分配由各自原有配置控制。
+
+`HCU_PLUGIN_DEEPEP_DISABLE_RECV_HOOK` 默认 `0`。设为 `1` 并重启后，当前进程的 Plugin DeepEP low-latency dispatcher 关闭接收 hook，dispatch 和 combine 改用完成事件等待。启用时记录 `HCU DeepEP low-latency receive hook disabled`。做 Decode 对照时只在 Decode 启动脚本设置，并保持共享专家融合和 SBO 关闭。
+
+## GLM5.3 INT8 DeepGEMM 包与接口
+
+当前 gfx936 W8A8 INT8 + DeepEP 配方固定使用
+`deepgemm==2.1.0+dtk2604.torch2110.2610301506.gedf118`（CPython 3.10 / DTK 26.04 / Torch 2.11）。
+这是该配方的版本要求，不是全部模型或架构的通用依赖钉。
+
+| 路径 | 权重打包 | GEMM 参数 |
+|---|---|---|
+| low-latency | `pack_i8_weight_pair32(...)`，与本配方的 `marlin_i8_masked_weight(..., shuffle_unique=0)` 逐字节相同 | `m_grouped_i8_gemm_nt_masked(..., shuffle_unique=0, config={"MODE": 1001})` |
+| normal | `marlin_i8_contiguous_weight(..., shuffle_unique=0, low_memory=True)`，vendor contiguous 布局 | `m_grouped_i8_gemm_nt_contiguous(..., shuffle_unique=0)` |
+| auto | 分别保存上述两种布局 | 按实际 dispatch 类型使用匹配权重 |
+
+gedf118 在 gfx936 上的 contiguous 包装器返回三维 ASM 布局，masked 包装器返回
+七维 pair32；两者不是同一种排列。较新 DeepGEMM 源码将两个包装器统一到 pair32，
+不能据此替换旧包的 contiguous 打包而保留其 ASM 消费者。AUTO 先保存 masked
+权重，再执行可能原地改写输入的 contiguous 打包，避免第二种布局读取已重排的权重。
+显式 `SGLANG_INT8_DEEPGEMM_ASM=1` 保留三维 masked ASM 打包及
+`m_grouped_w8a8_gemm_nt_masked` 消费者，不把它送入 pair32 的 `m_grouped_i8_gemm_nt_masked`。
+这些契约由 HY3 和 GLM 共用，不按模型另设互相覆盖的打包实现。
+
+此包不使用旧 `backend="cooperative"` 关键字；MODE=1001 在 masked pair32 路径选择
+BM128 cooperative kernel，不能把它传给 normal GEMM。输入为 INT8，激活 scale 为
+FP32 per-token，权重 scale 为 FP32 per-channel，输出 BF16。`masked_m` 为每个专家的
+实际有效行数，服务 bs、容量和 `expected_m` 不能代替它。
+
+Plugin 拥有 INT8 专家打包与运行时调用；Adapter 负责平台/DeepEP ABI 和上游
+`deep_gemm` 兼容出口，不覆盖上述 `deepgemm` INT8 函数。实际接线为
+`deepep_current` dispatcher、`deepep_fp8` Hook 和 `moe/deepep_int8.py` 执行体。
+旧的独立 INT8 runner 与未注册 Hook 已退役。
+
+`SGLANG_USE_DEEPGEMM_MOE=0`（以及等价的 `false`）显式关闭该插件 INT8
+DeepGEMM 分发，即使 runner 和 A2A backend 分别选择 `deep_gemm`、`deepep`。
+未设置此变量时，HCU 仍按设备、runner 和 A2A backend 自动选择兼容路径。
+
+更换包后必须重启并重新打包权重、捕获 Graph；不能把 post20261022 的启动目录继续
+置于 `PYTHONPATH` 首位。独立算子测试通过不代表 normal、其他架构或模型数据集已通过。
+验证范围与历史结果见 [开发记录](hcu-sglang-development.md)。

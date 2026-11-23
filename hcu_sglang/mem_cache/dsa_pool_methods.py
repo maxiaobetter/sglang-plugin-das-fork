@@ -26,6 +26,7 @@ import typing
 import sglang.srt.mem_cache.memory_pool as N
 from hcu_sglang.mem_cache import dsa_index_cache_mode as K
 from hcu_sglang.mem_cache.dsa_index_key_cache import IndexKeyCache
+from hcu_sglang.mem_cache.glm5_index_cache import fp8_index_cache_active
 from hcu_sglang.utils.detection import is_hcu
 
 _is_hcu = is_hcu()
@@ -86,10 +87,13 @@ def __init__(
     assert self.page_size % index_kpool == 0, (
         f"page_size {self.page_size} must be a multiple of index_kpool {index_kpool}"
     )
+    force_fp8_index_cache = fp8_index_cache_active()
     self.index_page_size = (
         self.page_size // dcp_size
         if hcu_sharded_draft
-        else self.page_size if _is_hcu else self.page_size // index_kpool
+        else self.page_size // index_kpool
+        if force_fp8_index_cache or not _is_hcu
+        else self.page_size
     )
     layer_range = range(self.start_layer, self.start_layer + self.layer_num)
     if skip_topk_layers is not None and len(skip_topk_layers) != self.layer_num:
@@ -143,7 +147,7 @@ def __init__(
     # num head == 1 and head dim == 128 for index_k in DSA
     assert index_head_dim == 128
     self.index_k_cache_mode = K.resolve_index_k_cache_mode(
-        dtype, self.index_page_size, index_head_dim
+        dtype, self.index_page_size, index_head_dim, force_fp8=force_fp8_index_cache
     )
     self.use_fp8_index_k_cache = (
         self.index_k_cache_mode is K.IndexKCacheMode.FP8_SCALED
@@ -161,7 +165,11 @@ def __init__(
     )
 
     physical_page_size = self.index_page_size
-    if N._is_hip and not _is_hcu:
+    if _is_hcu:
+        assert self.page_size == 64, (
+            f"HCU DSA requires a 64-token KV page, got page_size={self.page_size}"
+        )
+    elif N._is_hip:
         if N.aiter_can_use_preshuffle_paged_mqa():
             assert physical_page_size % 16 == 0, (
                 f"HIP preshuffle requires page_size to be a multiple of 16, got {physical_page_size}"
@@ -305,21 +313,7 @@ def host_pool_decls(self):
         and not (_is_hcu and getattr(self, "index_k_buffer", None))
     ) or all(self.skip_topk_layers):
         return kv_decls
-    index_k_decl = make_dsa_indexer_pool_decl(self)
-    if _is_hcu:
-        from hcu_sglang.layers.glm53_decode import model_matches
-        from sglang.srt.runtime_context import get_memory, process_model_config
-
-        memory = get_memory()
-        if (
-            memory.enable_hierarchical_cache
-            and memory.hicache_storage_backend is None
-            and model_matches(process_model_config().hf_config)
-        ):
-            from hcu_sglang.mem_cache.glm53_index_k_host import glm53_index_k_host_decl
-
-            index_k_decl = glm53_index_k_host_decl(index_k_decl)
-    return (*kv_decls, index_k_decl)
+    return (*kv_decls, make_dsa_indexer_pool_decl(self))
 
 @property
 def index_k_with_scale_buffer(self):
