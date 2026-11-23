@@ -49,7 +49,6 @@ from sglang.srt.layers.attention.dsa_backend import (
     compute_dsa_seqlens,
     concat_and_cast_q_fp8_pad,
     concat_cast_kv_fp8_pad,
-    concat_mla_absorb_q_general,
     dataclass,
     dcp_trtllm_sparse_attention,
     dequantize_k_cache_paged,
@@ -105,6 +104,7 @@ from hcu_sglang.layers.attention.current_dsa.dcp_page_table import transform_ind
 from hcu_sglang.layers.attention.current_dsa.dsa_metadata_manager import DSAMetadataManagementMixin
 from hcu_sglang.layers.attention.current_dsa.dsa_indexer_metadata import DSAIndexerMetadata
 from hcu_sglang.models.deepseek.current_v4.hcu_backend.hcu_cp_utils import cp_all_gather_rerange_output, cp_split_and_rebuild_position
+from hcu_sglang.layers.attention.current_dsa.concat import concat_mla_absorb_q_general
 from hcu_sglang.layers.attention.current_dsa.cp_helpers import can_dsa_prefill_cp_round_robin_split, dsa_cp_round_robin_split_data, dsa_cp_round_robin_split_q_seqs
 try:
     from aiter import get_mla_metadata_info_v1, get_mla_metadata_v1
@@ -604,6 +604,7 @@ class DeepseekSparseAttnBackend(
         from hcu_sglang.layers.attention.hisparse import _matches_channel_fp8
         from hcu_sglang.layers.glm53_decode import model_matches
 
+        from sglang.srt.layers.dp_attention import is_dp_attention_enabled
         _validate_dsa_dcp_launch(
             dcp_enabled=self.dcp_enabled,
             dcp_size=self.dcp_size,
@@ -625,7 +626,7 @@ class DeepseekSparseAttnBackend(
             speculative_num_draft_tokens=model_runner.server_args.speculative_num_draft_tokens,
             pp_size=model_runner.server_args.pp_size,
             attn_cp_size=parallel.attn_cp_size,
-            enable_dp_attention=model_runner.server_args.enable_dp_attention,
+            enable_dp_attention=is_dp_attention_enabled(),
             attn_tp_size=parallel.attn_tp_size,
             dcp_group_ranks=tuple(parallel.dcp_group.ranks) if self.dcp_enabled else (),
             attn_tp_group_ranks=tuple(parallel.attn_tp_group.ranks),
