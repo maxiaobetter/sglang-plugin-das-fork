@@ -3109,7 +3109,7 @@ Berlin、Tokyo、LANTERN-8306、12，均为 stop。请求后健康检查 HTTP 20
 
 同时把 `handle_bootstrap_failure` 中不再使用的 `cleanup_done` 局部变量删除，避免未使用变量告警。
 
-**实际验证（本机，Windows / Python 3.14，无 torch、无 sglang、无 DCU）**：
+**实际验证（本机，Windows / Python 3.14，无 torch、无 sglang、无 HCU）**：
 
 - `python -m py_compile hcu_sglang/disagg/prefill.py` 通过。
 - 新增 `tests/test_pd_prefill_inflight_consensus.py`，9 项 AST 结构契约全部通过：导入来源、TP/CP 两次汇总、汇总位置在 poll 循环之后、done 集合由汇总结果重建、已回包请求提前出队、两处入队不依赖 `cleanup_done`、假 sender abort 在入队之前、告警限频。
@@ -4026,7 +4026,7 @@ Channel FP8 prefill worker 在启动时编译或加载节点缓存。各 rank
 通过文件锁和原子发布共享产物。K1 仍按模型结构、量化方式和张量布局选择，
 加载扩展时检查 ABI 和导出入口。配置见 [K1 indirect-A](configuration.md#8-glm-53-fp8-prefill-的-k1-indirect-a-候选)。
 本地用替代编译进程核对八进程并发只生成一份产物、热启动复用、
-Python 或 DTK 变化后重新构建，以及编译失败后可重试。DCU 上的实际
+Python 或 DTK 变化后重新构建，以及编译失败后可重试。HCU 上的实际
 编译、服务启动和 K1 命中待验证。
 HCU dcp=1 在 FlashMLA KV 分发前使用匹配 page table 的有效 top-k 行，
 保留隔离试验带入的 padding 行裁剪逻辑。
@@ -4057,7 +4057,7 @@ HCU DSA FP8 KV 池把 Graph 的占位槽放在最后一个可分配页之后。
 在个人 fork 的 `6d8ad63` 基线上，本地复现了小 batch 写到最后一个
 可分配页以及普通 decode batch 128 触发容量断言。修复后用 CPU 桩
 执行池分配和槽号转换，覆盖普通 decode、EAGLE、prefill bucket、
-eager 和 DCP=1。DCU 上的服务、换输入 Graph replay、调用对齐、
+eager 和 DCP=1。HCU 上的服务、换输入 Graph replay、调用对齐、
 性能和端到端精度待验证。
 
 DCP4 验收配方使用 FP8 KV、64 token 页、`ag_rs` 和双阶段 `flashmla_kv`。
@@ -4129,7 +4129,7 @@ GLM-5.3 的 PD Decode 在 overlap 模式下可能先提交下一轮 forward，�
 GLM-5.3 的 PP1 Prefill CP LayerSplit 单层 MTP 配方中，draft Main-KV 的 L2 备份和
 回载只在该层 owner 上执行。设备索引仍是 target 模型层数之后的 packed draft 索引，
 host 索引使用本 rank 的 target host 层数之后的槽位。Index-K 沿用已有的 owner 过滤。
-本轮只做本地 lint、语法和结构检查，DCU 上的搬运、重叠调度及端到端精度待验证。
+本轮只做本地 lint、语法和结构检查，HCU 上的搬运、重叠调度及端到端精度待验证。
 
 发布分支冒烟发现 v0.5.22 同时传入 AFTER hook 的位置返回值和宿主 `result=` 参数。
 Decode hook 将处理后的输出作为仅限位置参数接收，避免与宿主关键字冲突。
@@ -4418,3 +4418,19 @@ GEMM 由 DeepGEMM 执行。算子声明 `output` 可写，真实实现和 fake �
 的组件探针在 `aot_eager` 和 Inductor 下均与 eager 逐元素一致，且 Combine 入口收到
 调用方提供的原始 GEMM2 输出地址。普通 CUDA Graph 更换输入重放两次也通过。真实双节点
 RDMA 与注册通信缓冲区仍待服务验证。
+
+## GLM-5.3 W4A8 HiSparse PD Decode 容量
+
+对齐框架 [#70](https://github.com/maxiaobetter/sglang-das/pull/70) 的 Channel W4A8、FP8 KV、DCP=1 配置。目标 Index-K 与逻辑分配器按完整页取整，MTP draft 从分配器读取相同的地址空间。PD Decode worker 用逻辑池容量计算请求上限，设备热池仍按物理容量分配。发布基线的 Mooncake MLA host 注册已使用 CPU 张量地址。
+
+本次验证限于本地容量计算、配置分发与静态检查。真实双节点 Mooncake、EAGLE 换输入回放、1M 请求输出及性能仍待验证。
+
+## 2026-11-21 GLM5.2 FP8 最新 22 分支组合验证
+
+以 1d51ae5 为固定 plugin 基点，保留用户 3872dc0/#89 的既有 RoPE 方案，启动配方补齐 LightOP RoPE 开关；不新增 RoPE 实现。仅新增 current_dsa 的 LightOP planner resolver，backend/indexer 共用，非 HCU 委托原 resolver。adapter 同卡数外来 PCI guard 修复单独归仓。修复前反例、旧基点组件通过及最新组合未验收项分别记录，见 [FP8 适配记录](glm52-fp8-adaptation.md)。
+
+本轮固定组合已完成 Graph 服务、两轮各81请求文本/EAGLE统计一致、三项正常stop检查、32份逐rank trace及稳定吞吐对照。具体短输入TTFT退化、0518 profiler后会话异常和未完成数据集精度范围见 FP8 适配记录；未声明全仓合同或CPU全套通过。
+
+## 2026-11-23 PR 拆分检查
+
+LightOP MQA planner 修复独立分支重新通过4项接线测试（CPU张量、设备可见）和3项gfx938 GPU/变输入Graph回归。隐藏设备时接线测试收集遇到上游 cutlass_fp8_supported 的 NoneType 比较错误，原失败保留，不记作通过。完整CPU unittest复测195项，仍为3项导入错误、13项跳过。L0与导览快照检查通过；未执行浏览器视觉验收。adapter节点门禁与triage失败另列于两仓PR说明，未以模型精度结果覆盖这些失败。仅准备Draft评审，未重复提交已有RoPE/TopK实现。
