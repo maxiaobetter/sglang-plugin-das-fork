@@ -28,8 +28,8 @@ class Glm5NextMHCCPLayerCommunicator(MHCLayerCommunicator):
     ) -> bool:
         return (
             is_sparse_layer
-            and dsa_use_prefill_cp(forward_batch)
             and get_moe_a2a_backend().is_none()
+            and dsa_use_prefill_cp(forward_batch)
         )
 
     def prepare_mlp_input(

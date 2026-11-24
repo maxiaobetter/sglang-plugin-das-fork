@@ -17,12 +17,36 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import sglang.srt.models.deepseek_nextn as N
 import sglang.srt.layers.attention.dsa.utils as D
 import hcu_sglang.models.deepseek.current_v4.hcu_backend.hcu_cp_utils as C
 import hcu_sglang.models.deepseek.current_v4.hcu_backend.compat as H
 import sglang.srt.layers.moe.utils as M
 import sglang.srt.layers.cp.utils as P
+from sglang.srt.layers.layer_boundary.residual.add_norm import NormQuantReadout
+
+from hcu_sglang.glm5_next_policy import (
+    uses_full_tp_flash_decode_dp,
+    uses_full_tp_flash_prefill_cp,
+)
+
+
+class _FlashNextNReadout(NormQuantReadout):
+    is_plain_norm = False
+
+    def read(self, residual, norm, quant_format="", post_residual_addition=None):
+        if quant_format or post_residual_addition is not None:
+            return super().read(residual, norm, quant_format, post_residual_addition)
+        return residual, residual
+
+
+class _FlashNextNDecoder(N.DeepseekV2DecoderLayer):
+    @classmethod
+    def stage_facts(cls, config, layer_id, **kwargs):
+        attn, ffn = super().stage_facts(config, layer_id, **kwargs)
+        return replace(attn, read=_FlashNextNReadout()), ffn
 
 
 def enable_cp_v2() -> bool:
@@ -99,11 +123,17 @@ def __init__(
     self.vocab_size = config.vocab_size
     self.hcu_glm_ct_native_eh_norm = _use_native_eh_norm(config, quant_config)
 
+    flash_prefill_cp = uses_full_tp_flash_prefill_cp(config, quant_config)
+    embedding_tp_kwargs = (
+        {"enable_tp": False}
+        if flash_prefill_cp
+        else N.get_embedding_tp_kwargs()
+    )
     self.embed_tokens = N.VocabParallelEmbedding(
         config.vocab_size,
         config.hidden_size,
         prefix=N.add_prefix("embed_tokens", prefix),
-        **N.get_embedding_tp_kwargs(),
+        **embedding_tp_kwargs,
     )
 
     self.enorm = N.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -134,7 +164,10 @@ def __init__(
     from sglang.srt.configs.model_config import is_glm_moe_dsa
 
     is_glm_dsa = is_glm_moe_dsa(config)
-    single_stream = is_glm5_next_hcu(config) and glm5_decode_single_stream_enabled()
+    flash_decode_dp = uses_full_tp_flash_decode_dp(config, quant_config)
+    single_stream = flash_decode_dp or (
+        is_glm5_next_hcu(config) and glm5_decode_single_stream_enabled()
+    )
     self.alt_stream = (
         N.torch.cuda.Stream()
         if (
@@ -152,8 +185,11 @@ def __init__(
         layer_name = "layers." + str(config.num_hidden_layers)
 
     self.quant_config = quant_config
+    decoder = N.DeepseekV2DecoderLayer
+    if N.envs.SGLANG_USE_FUSED_RMS_QUANT.get() and (flash_prefill_cp or flash_decode_dp):
+        decoder = _FlashNextNDecoder
     with N.layer_stack():
-        self.decoder = N.DeepseekV2DecoderLayer(
+        self.decoder = decoder(
             config,
             0,
             quant_config=quant_config,

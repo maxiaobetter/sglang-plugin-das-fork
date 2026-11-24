@@ -18,6 +18,7 @@ import re
 import torch
 from torch import nn
 from sglang.srt.models import deepseek_v2 as N
+from hcu_sglang.glm5_next_policy import is_glm5_flash_channel_fp8
 from hcu_sglang.utils.detection import is_hcu as is_hcu
 from hcu_sglang.utils.detection import is_hcu_native_fp8_supported
 from hcu_sglang.models.deepseek.deepseek_nextn.methods.model import enable_cp_v2
@@ -25,36 +26,6 @@ from sglang.srt.layers.attention.dsa.utils import dsa_use_prefill_cp
 from hcu_sglang.models.deepseek.current_v4.hcu_backend.hcu_cp_utils import mla_use_prefill_cp
 
 _is_hcu = is_hcu()
-
-
-def _glm5_flash_channel_fp8_router(config, quant_config):
-    config = getattr(config, "text_config", None) or config
-    if (
-        not _is_hcu
-        or getattr(config, "model_type", None) != "glm5_next_text"
-        or getattr(config, "hidden_size", None) != 4096
-        or getattr(config, "n_routed_experts", None) != 288
-        or getattr(config, "index_kpool", None) != 4
-        or getattr(config, "qk_rope_head_dim", None) != 0
-        or quant_config.get_name() != "compressed_tensors"
-    ):
-        return False
-
-    from compressed_tensors.quantization import QuantizationStrategy, QuantizationType
-
-    scheme = getattr(quant_config, "target_scheme_map", {}).get("Linear", {})
-    weight = scheme.get("weights")
-    activation = scheme.get("input_activations")
-    return (
-        weight is not None
-        and activation is not None
-        and weight.type == activation.type == QuantizationType.FLOAT
-        and weight.num_bits == activation.num_bits == 8
-        and weight.strategy == QuantizationStrategy.CHANNEL
-        and activation.strategy == QuantizationStrategy.TOKEN
-        and not weight.dynamic
-        and activation.dynamic
-    )
 
 
 def _glm53_fp8_cp_router(self, forward_batch):
@@ -126,7 +97,7 @@ def __init__(
         and quant_config.get_name() in ("compressed_tensors", "slimquant_w4a8", "slimquant_w4a8_marlin")
         and not is_hash_moe
         and not self.is_deepseek_v4
-        and (N.is_glm_moe_dsa(config) or _glm5_flash_channel_fp8_router(config, quant_config))
+        and (N.is_glm_moe_dsa(config) or is_glm5_flash_channel_fp8(config, quant_config))
     )
     from hcu_sglang.layers.rotary import _glm53_fp8_model
 

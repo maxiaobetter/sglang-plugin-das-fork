@@ -20,6 +20,7 @@
 # https://github.com/vllm-project/vllm/blob/fb6af8bc086328ca6659e72d11ffd4309ce4de22/vllm/model_executor/models/deepseek_v2.py
 from __future__ import annotations
 
+from hcu_sglang.glm5_next_policy import uses_full_tp_flash_prefill_cp
 from hcu_sglang.models.deepseek.deepseek_v2 import constants as C
 from sglang.srt import utils as U
 import sglang.srt.models.deepseek_v2 as N0
@@ -198,6 +199,8 @@ def __init__(
             )
             if N0.get_dsa_index_kpool(config) > 1:
                 indexer_kwargs["skip_rope"] = skip_rope
+                if is_nextn and uses_full_tp_flash_prefill_cp(config, quant_config):
+                    indexer_kwargs["write_owned_cp_pools"] = False
             self.indexer = indexer_cls(**indexer_kwargs)
 
     self.kv_b_proj = N0.ColumnParallelLinear(

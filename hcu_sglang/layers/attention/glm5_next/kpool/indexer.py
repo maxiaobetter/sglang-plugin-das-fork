@@ -169,6 +169,7 @@ class IndexerKPool(Indexer):
         alt_stream: Optional[torch.cuda.Stream] = None,
         skip_rope: bool = False,
         config: Optional[PretrainedConfig] = None,
+        write_owned_cp_pools: bool = True,
     ):
         super().__init__(
             hidden_size=hidden_size,
@@ -189,6 +190,7 @@ class IndexerKPool(Indexer):
             alt_stream=alt_stream,
         )
         self.skip_rope = skip_rope
+        self.write_owned_cp_pools = write_owned_cp_pools
 
         assert config is not None, "IndexerKPool requires the model config"
         # Launch-time invariants (page_size, index_topk %, EAGLE topk)
@@ -569,7 +571,8 @@ class IndexerKPool(Indexer):
             "kpool extend plan is required; check _init_kpool_extend_metadata"
         )
         pool = get_token_to_kv_pool()
-        writes, tails, cp = plan.writes, plan.tails, plan.cp
+        writes, tails = plan.writes, plan.tails
+        cp = plan.cp if self.write_owned_cp_pools else None
 
         if writes.is_empty and tails.is_empty:
             return

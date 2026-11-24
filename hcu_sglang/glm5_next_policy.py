@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from sglang.srt.arg_groups.overrides import resolved_view
 from sglang.srt.runtime_context import get_server_args
 from sglang.srt.configs.model_config import get_dsa_index_kpool
 from sglang.srt.environ import envs
 from sglang.srt.utils import is_cuda
 from hcu_sglang.utils.detection import is_hcu
+
+if TYPE_CHECKING:
+    from sglang.srt.server_args import ServerArgs
 
 
 def is_glm5_next_hcu(config) -> bool:
@@ -22,6 +27,61 @@ def is_glm5_next_hcu(config) -> bool:
 
 def get_glm5_next_runtime_args():
     return resolved_view(get_server_args())
+
+
+def is_glm5_flash_channel_fp8(config, quant_config) -> bool:
+    config = getattr(config, "text_config", None) or config
+    if (
+        not is_hcu()
+        or getattr(config, "model_type", None) != "glm5_next_text"
+        or getattr(config, "hidden_size", None) != 4096
+        or getattr(config, "n_routed_experts", None) != 288
+        or get_dsa_index_kpool(config) != 4
+        or getattr(config, "qk_rope_head_dim", None) != 0
+        or quant_config is None
+        or quant_config.get_name() != "compressed_tensors"
+    ):
+        return False
+
+    from compressed_tensors.quantization import QuantizationStrategy, QuantizationType
+
+    scheme = getattr(quant_config, "target_scheme_map", {}).get("Linear", {})
+    weight = scheme.get("weights")
+    activation = scheme.get("input_activations")
+    return (
+        weight is not None
+        and activation is not None
+        and weight.type == activation.type == QuantizationType.FLOAT
+        and weight.num_bits == activation.num_bits == 8
+        and weight.strategy == QuantizationStrategy.CHANNEL
+        and activation.strategy == QuantizationStrategy.TOKEN
+        and not weight.dynamic
+        and activation.dynamic
+    )
+
+
+def uses_full_tp_flash_prefill_cp(config, quant_config) -> bool:
+    if not is_glm5_flash_channel_fp8(config, quant_config):
+        return False
+    args = get_glm5_next_runtime_args()
+    return (
+        args.disaggregation_mode == "prefill"
+        and args.enable_prefill_cp
+        and args.attn_cp_size == args.tp_size
+        and args.attn_cp_size > 1
+    )
+
+
+def uses_full_tp_flash_decode_dp(config, quant_config) -> bool:
+    if not is_glm5_flash_channel_fp8(config, quant_config):
+        return False
+    args = get_glm5_next_runtime_args()
+    return (
+        args.disaggregation_mode == "decode"
+        and args.attn_cp_size == 1
+        and args.attn_dp_size == args.ep_size == args.tp_size
+        and args.tp_size > 1
+    )
 
 
 def should_remap_pd_dsa_seed_to_local_slots(

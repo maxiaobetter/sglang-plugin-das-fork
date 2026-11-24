@@ -123,6 +123,8 @@ if _is_hcu:
 
 from hcu_sglang.glm5_next_policy import (
     get_glm5_next_runtime_args as get_global_server_args,
+    uses_full_tp_flash_decode_dp,
+    uses_full_tp_flash_prefill_cp,
 )
 from sglang.srt.models.deepseek_v2 import (
     DeepseekV2AttentionMLA as ModelNextMLAAttention,
@@ -402,7 +404,7 @@ class ModelNextLinearAttention(nn.Module):
         forward_batch: ForwardBatch,
         input_quant_args=None,
     ):
-        cp_prefill = dsa_use_prefill_cp(forward_batch)
+        cp_prefill = dsa_use_prefill_cp(forward_batch, self.nsa_enable_prefill_cp)
         if cp_prefill and self._cp_fuse_symm_mem:
             from torch.distributed._symmetric_memory import (
                 _fused_all_gather_matmul,
@@ -452,7 +454,7 @@ class ModelNextLinearAttention(nn.Module):
     def forward_qkvbfg_fused(
         self, hidden_states: torch.Tensor, forward_batch: ForwardBatch
     ):
-        cp_prefill = dsa_use_prefill_cp(forward_batch)
+        cp_prefill = dsa_use_prefill_cp(forward_batch, self.nsa_enable_prefill_cp)
         if cp_prefill and self._cp_fuse_symm_mem:
             from torch.distributed._symmetric_memory import (
                 _fused_all_gather_matmul,
@@ -532,7 +534,7 @@ class ModelNextLinearAttention(nn.Module):
         core_attn_out = self.o_norm(core_attn_out, norm_gate)
         core_attn_out = core_attn_out.squeeze(0).flatten(-2)  # 1 n h d -> n (h d)
 
-        cp_prefill = dsa_use_prefill_cp(forward_batch)
+        cp_prefill = dsa_use_prefill_cp(forward_batch, self.nsa_enable_prefill_cp)
         if cp_prefill and self._cp_fuse_symm_mem:
             from torch.distributed._symmetric_memory import (
                 _fused_matmul_reduce_scatter,
@@ -1024,6 +1026,7 @@ class ModelNextModel(nn.Module):
                 enable_tp=not (
                     is_dp_attention_enabled()
                     or (_is_hcu and envs.SGLANG_ENABLE_EMBED_REPLICATION.get())
+                    or uses_full_tp_flash_prefill_cp(config, quant_config)
                 ),
             )
         else:
@@ -1035,6 +1038,7 @@ class ModelNextModel(nn.Module):
             torch.cuda.Stream()
             if (_is_cuda or envs.SGLANG_NPU_USE_MULTI_STREAM.get())
             and not glm5_decode_single_stream_enabled()
+            and not uses_full_tp_flash_decode_dp(config, quant_config)
             else None
         )
 

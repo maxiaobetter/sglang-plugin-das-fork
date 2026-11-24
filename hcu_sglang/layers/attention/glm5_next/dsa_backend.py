@@ -2070,7 +2070,7 @@ class NativeSparseAttnBackend(
                     if not layer.is_cross_attention
                     else forward_batch.encoder_out_cache_loc
                 )
-                if dsa_use_prefill_cp(forward_batch) and k.shape[0] != cache_loc.numel():
+                if k.shape[0] != cache_loc.numel() and dsa_use_prefill_cp(forward_batch):
                     from hcu_sglang.layers.glm5_next_cp_utils import (
                         cp_all_gather_rerange_output,
                     )
@@ -2127,10 +2127,10 @@ class NativeSparseAttnBackend(
                 "get_key_buffer_with_prefetch_history",
                 None,
             )
-            if _is_hcu and dsa_use_prefill_cp(forward_batch)
+            if _is_hcu
             else None
         )
-        if get_key_buffer_with_history is not None:
+        if get_key_buffer_with_history is not None and dsa_use_prefill_cp(forward_batch):
             kv_cache = get_key_buffer_with_history(
                 layer.layer_id,
                 has_history=dsa_prefill_has_history(forward_batch),

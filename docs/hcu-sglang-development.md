@@ -4472,3 +4472,160 @@ Draft Extend 复用固定 0.5.22 worker 方法，将分支对齐到原生的
 `renorm_draft_probs` 和 `fast_topk`。Prefill 后的 Draft Extend 原本已走概率路径。
 8 卡需核对 kernel 模板及参数、pending 生命周期、三类 graph 同址换输入重放。
 性能和真实请求精度在调用对齐后另验。
+
+### GLM-5.3 Flash CP Prefill 的词嵌入和 NextN
+
+飞书 Cookbook revision 41 的 8 卡 Prefill 中，原生让每个 CP rank
+读取完整输入词嵌入表。0.5.22 组合运行时在相同的 CP 拓扑下关闭
+DP attention，原来的词嵌入分发随之改为按词表切分。候选实测每个
+rank 在主 Prefill 和 NextN 各多一次词表分片查找与 TP 归约。
+
+GLM-5.3 Flash 在独立 Prefill 角色且 attention CP 覆盖整个 TP 组时，
+主模型和 NextN 使用相同的完整词嵌入布局。沿用现有加载器和查表实现，
+保证共享权重与两侧布局一致。
+
+在启用 Cookbook 的融合选项时，该队列的原生 Channel FP8 NextN
+输入直接供 QKV 投影使用。0.5.18 的 communicator 在这个分支跳过
+输入 RMSNorm，QKV 的逐 token FP8 量化调用不接收 RMSNorm 权重。
+候选按相同的模型、输入量化和 CP Prefill 条件选择对应的 attention
+输入分发。显式指定量化格式的融合路径仍由原有 readout 处理。
+
+相同 4096-token 请求在 NextN 中，原生比候选少一次
+`uint8[1024, 132]` 的 KPool 槽位交换。该步骤各 rank 已持有完整的
+key、gate score 和本地缓存，Flash NextN 在独立 CP Prefill 角色中
+直接写完整压缩结果。主模型保持按原有 owner mask 交换。
+
+修复版在相同的 Cookbook 配方下完成两轮 8 卡采集。主模型和
+NextN 每 rank 的通信接口、形状和顺序分别为 114 次和 5 次，与
+原生一致。主模型的 grouped GEMM 每 rank 84 次，首次 grid 和
+block 与原生一致。NextN 的 grouped GEMM 每 rank 2 次，候选
+首次 M 网格落在原生多轮观测范围内。Mamba 槽清零和缓冲拷贝
+仍采用各自运行时实现，记为性能项。
+
+### GLM-5.3 Flash CP1 Decode 的 NextN 输入
+
+在 Cookbook CP1 Decode 的展开图中，候选每次 Draft 多 4 次
+输入 RMSNorm，Draft Extend 多 1 次。两侧的 KPool TopK、FlashMLA、
+BF16 router、FP8 激活融合的调用次数和首发几何一致。原生在这两条
+NextN 路径上也将输入直接交给逐 token FP8 QKV 投影。
+
+将相同的 NextN 输入分发扩展到独立 Decode 角色下的 CP1、全 TP
+attention DP 与全 TP EP。保留启动融合开关及显式融合输入格式。
+修复版展开图在各 rank 的 Verify、Draft、Draft Extend 分别有
+1848、199、66 次设备调用，与原生一致。Draft 的四次缓冲区复制
+仍使用各自运行时的等效实现，记为性能项。恢复 Cookbook 原图
+设置后，三条路径均完成 8 rank 同址换输入重放。两组受控输入
+各 192 个输出 token 均与原生一致。两侧的 HIP 合并节点数仍有差异。
+
+#### CP1 Decode 的 GPU stream
+
+Cookbook 独立 Decode 的原生 Verify、Draft 和 Draft Extend 在 8 个
+rank 都使用单 stream。早期候选将共享专家和路由、DeepEP 分到两条
+stream，展开图的设备调用数一致。保留 Cookbook HIP 图聚合，仅用
+已有开关禁用辅助流后，并发 8、16 的输出吞吐从候选的 120.0、
+246.4 token/s 恢复到 146.7、305.0 token/s，原生为 147.6、298.3。
+候选 TTFT p50 恢复到 44.6、46.1 ms，原生为 46.0、44.9 ms。
+
+模型和 NextN 在同一 Flash Channel FP8、独立 Decode、CP1 且
+attention DP 与 EP 都覆盖 TP 组的条件下采用单 stream。这一条件
+复用 NextN 原生输入路径的选择。适配生效无需增加启动参数。
+
+正式构建在未加辅助流开关的配方下通过 8 rank 的三类图同址重放。
+Verify 和 Draft Extend 的 HIP 合并节点分别为 255 和 11，与原生
+一致。Draft 的缓冲复制和合并节点数仍有差异。关闭 profiler 后，
+并发 8、16 的吞吐分别为 145.7、307.4 token/s，原生为 147.6、
+298.3 token/s。两组请求的缓存命中一致，TPOT p50 相差约 3%。
+
+### 独立 CP8 Prefill 的输入补收
+
+CP8 独立 Prefill 关闭 HiCache 的对照中，同一批四条输入的前向耗时接近
+原生。候选更常在只收到部分请求时开始首批前向。候选的 15 个拆批样本
+中，后批 33 条请求均已由前端发送，调度器在首批前向开始后收到它们。
+一次非阻塞补收的受控试验将四条同批从 5/20 提高到 20/20。
+
+插件在 HCU、独立 Prefill、PP1、attention DP1 且 CP 覆盖 TP 的重叠循环中，
+将首个 bootstrap 投票期间的前端 socket 可读状态附加到已有的前缀长度
+MAX 归约。首次前向前、无在途结果且各 rank 看到输入可读时，调度器
+最多使用现有 intake 路径补收一次。单请求无需另一次接收或通信投票。
+非 ZMQ、跳采或阻塞接收以及暂停请求仍走现有输入约束。
+
+试验使用同一节点的 8 张可用卡和相同 Cookbook 配方，固定原生版本、
+官方运行时与插件源码。正式源码已对照 1 条及实际 4 条同批的全部 8 rank
+设备 profile，通信实参和 grouped GEMM 调用通过。四条同批时原生的
+GPU 布尔掩码归约在候选侧由同一份 CPU 掩码完成，记为性能项。
+
+关闭 profiler 后各侧每档计时 120 条 4096 token 请求，缓存命中均为 0。
+并发 4 的候选 30/30 组四条同批，原生 16/30。吞吐由原生的
+18,308 输入 token/s 提高到候选的 19,429，TTFT p95 由 1012 ms 降到
+848 ms。同为四条入批的服务端前向中位数为 801.2 和 804.8 ms，
+候选 TTFT 中位数仍高约 16 ms。并发 1 的候选 TTFT 中位数为
+419.6 ms，原生为 354.9 ms，保留为未对齐项。IFB DP8/EP8 真实请求
+精度在单独 Prefill 性能通过后验证。
+
+#### CP8 Prefill 的 MoE token 上限
+
+同一组卡上的 24 条单请求逐 rank 探针将新增的前向耗时分到 MoE、
+MLA 和其余提交路径。候选的 MoE 每请求 86 次查询非填充 token 上限。
+同一个 legacy CP metadata 中的设备标量只构造一次，后续查询仍反复进入
+DSA CP 分发判断。
+
+在 HCU legacy CP 的稀疏 MoE 查询中，命中当前 metadata 已计算的标量时
+直接返回。同一 metadata 首次查询仍按原条件计算，CP v2 仍经策略分发。
+复用范围以 metadata 实例为界。单条及四条同批分别完成 8 rank 调用复验，
+通信参数顺序和已加载核心库指纹一致。NextN 的 LightOp scatter/gather
+网格随接收行数变化，用同进程同输入复采确认后记为非确定性。
+
+同一组 8 卡各跑两轮，关闭 profiler，各侧每档计时 120 条 4096 token
+请求，缓存命中为 0。原生和候选的并发 1 TTFT p50 分别为 347.4 和
+392.6 ms，上一版候选为 419.6 ms。并发 4 的实际四条同批服务端前向
+p50 分别为 799.2 和 800.4 ms，候选 29/30 组四条同批。独立 CP8
+性能仍有差距，IFB DP8/EP8 验收保留。
+
+#### CP8 Prefill 的 FP8 提交和 MLA 前向
+
+同一组 8 卡上，原生和候选的 4096-token 并发 1 TTFT p50 分别为
+389.6 和 450.6 ms。逐 rank 探针显示共享专家前向多约 5.5 ms。
+MLA 的 12 次 CP KV gather 在原生准备阶段和候选 attention 后端各执行
+一次，单次请求的通信次数一致。按相同范围计时，MLA 前向仍多约 1–2 ms。
+逐专家未填充计数覆盖 43 层和 8 rank，两侧重复输入都有路由波动，
+逐层最忙 EP rank 的收包量加总差小于 0.2%。
+
+HCU FP8 线性层仅在有填充行时裁切输出。输出投影量化先核对是否处于
+适用上下文，未启用 skinny GEMM 时直接提交原 DeepGEMM。
+Glm5Next 的 MoE 先排除已选用 all-to-all 的情况，再判断 CP fallback。
+MLA 在启用历史读取能力时才额外判断 CP，并按实际 KV 行数决定是否
+需要检查聚合。量化、内核、KV 布局与服务参数沿用原配方。
+
+本次代码通过 L0 结构检查。隔离候选的单条和四条同批 8-rank 调用通过。
+两档有序 collective 和已加载核心库指纹一致。并发 1 的 NextN scatter/gather
+网格与实际接收行数对应，沿用同进程复采验证的非确定性分类。
+
+随后在同一组 8 卡完成关闭 profiler 的配对计时。原生和候选分别有 60 条
+4096-token 并发 1 和 60 条并发 4 请求，缓存命中为 0。并发 1 TTFT p50
+分别为 391.2 和 434.9 ms，剩余 43.6 ms。四条实际同批的前向 p50
+分别为 814.4 和 819.7 ms。候选的 15 组并发 4 都形成实际四条同批，
+原生为 6 组。原生 1P1D 精度仍等待 Prefill 和 Decode 卡组都可用。
+
+继续核对主前向时，KDA 的投影和输出归约改为复用模块初始化时记录的 CP
+能力，仍按当前 batch 的前向模式与 CP metadata 选择分支。该增量的编译和
+L0 检查通过，实际 8 rank 调用和稳态性能待验证。
+
+#### Docker CP8 Prefill 的 FP8 量化缓冲区
+
+原生和候选在同一组 8 卡的 Docker 容器中通过调用核验。关闭 profiler 后，
+4096-token 并发 1 TTFT p50 为 418.2 和 452.7 ms，p95 为 497.4 和
+664.9 ms。并发 4 实际四条同批前向 p50 为 829.3 和 805.3 ms。
+独立探针中候选 FP8 linear 每请求 124 次，动态 per-token 量化 81 次。
+
+在隔离候选上试验直接分配实际行数的 FP8 输出和 scale。单条及四条同批的
+Prefill 8-rank 调用核验通过，固定夹具输出一致。每请求 81 次动态 per-token
+量化，`torch.empty` 从 162 次降到 81 次。
+
+换入同 NUMA 的空闲卡后，三个容器在同组 8 卡重新计时。并发 1 TTFT p50
+原生 434.1 ms，候选改前 659.2 ms、改后 666.0 ms。同期前向 p50 为
+413.3 / 592.9 / 602.8 ms，排队 p50 为 3.7 / 35.1 / 34.2 ms。
+并发 4 的真实四条同批前向 p50 为 832.4 / 919.8 / 868.9 ms，
+原生 2/15 组形成四条同批，两个候选均为 15/15。候选改前和改后的
+有效参数及 KV 池大小一致。改动未改善并发 1，且分段探针也观察到 DeepEP
+耗时波动。补丁保存在实验产物目录，工作树恢复到本轮改动前的实现。
+新版 Decode 图重放和真实数据集精度未验证。
