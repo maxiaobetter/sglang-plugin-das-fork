@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Optional, Union
 
 if TYPE_CHECKING:
@@ -159,6 +160,10 @@ class ForwardBatchMethods:
         if (
             model_runner.server_args.disaggregation_mode == "prefill"
             and N.get_parallel().attn_cp_size > 1
+            and (
+                model_runner.server_args.nnodes != 1
+                or os.getenv("SGLANG_PD_HIDDEN_POOL_TOKENS") is not None
+            )
         ):
             gathered_capture_layers = [None] * N.get_parallel().attn_cp_size
             N.torch.distributed.all_gather_object(

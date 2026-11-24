@@ -28,6 +28,7 @@
 - [2026-11-19：DeepEP 清理接口兼容](#2026-11-19-deepep-清理接口兼容)
 - [2026-11-19：GLM-5.3 FP8 稳态 prefill 优化](#2026-11-19-glm-53-fp8-稳态-prefill-优化)
 - [2026-11-19：静态 LPLB 产物校验](#2026-11-19-静态-lplb-产物校验)
+- [2026-11-24 · 单节点 CP Prefill 的 PD hidden 元数据门控](#2026-11-24--单节点-cp-prefill-的-pd-hidden-元数据门控)
 - [附录：布局、操作方式与汇总](#附录布局操作方式与汇总)
 
 两份早期独立开发记录已全文收录（卷内同链）。历史结果不代表当前代码已重新验证。
@@ -4629,3 +4630,11 @@ Prefill 8-rank 调用核验通过，固定夹具输出一致。每请求 81 次�
 有效参数及 KV 池大小一致。改动未改善并发 1，且分段探针也观察到 DeepEP
 耗时波动。补丁保存在实验产物目录，工作树恢复到本轮改动前的实现。
 新版 Decode 图重放和真实数据集精度未验证。
+
+## 2026-11-24 · 单节点 CP Prefill 的 PD hidden 元数据门控
+
+- 基线为 SGLang 0.5.22、插件 `33fc85b` 和 adapter `00eaf49`。改动位于 `ForwardBatchMethods.init_new`。单节点 Prefill 的 `SGLANG_PD_HIDDEN_POOL_TOKENS` 未设置时，各 CP rank 都不会构造 raw-hidden 池。若 Decode 请求的元数据需要本段捕获目标层，Prefill 的 bootstrap 会在缺池时拒绝该请求。
+- 主模型和 NextN 共用该入口。多节点或显式配置池时，继续执行组内 `all_gather_object` 和非空层列表的一致性校验。本 rank 的空载荷可能来自 bootstrap 元数据只在指定 rank 可见。显式 hidden capture mode、draft KV 传输和普通 PD 状态沿原逻辑执行。
+- 在实际 Mooncake P/D 上，8 张固定 Prefill 卡关闭 HiCache，关 profiler，16 条预热，4096 token 的 C1 同进程交错 48 对。D 流式 TTFT p50 原路径 1068.47 ms、跳过 979.48 ms，配对中位减少 88.14 ms，95% CI 为减少 66.09–97.22 ms。两侧 48 对的 Decode token 序列一致，各接受 480 个 draft token。每个 Prefill rank 的 target 和 draft 各验证一次分支。
+- Docker 实装复验加载修改后的源码。两组不同的 4096-token 真实输入分别走保留和跳过路径，8 个 Prefill rank 的主模型与 NextN 各自观察到一次和零次 Gloo gather，每组的 target 和 draft capture mode 分别一致，两组的成对 Decode token 和 verify 次数一致。CI 对应 Ruff、L0、代码语法和生成导览校验已通过。
+- 本次收益只记录该真实请求与配方。raw-hidden 启用后的传输、跨节点执行、完整数据集精度和 graph 同址换输入复验仍待独立验证。
