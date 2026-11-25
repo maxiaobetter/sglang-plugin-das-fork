@@ -123,24 +123,18 @@ def _native_mhc_functions():
     from aiter.ops.tilelang import mhc_post_fwd, mhc_pre_big_fuse
 
     logging.getLogger(__name__).info(
-        "HCU native mHC enabled by SGLANG_HCU_NATIVE_MHC=1; "
-        "AITER pre/post, output normalization remains with the caller"
+        "HCU AITER TileLang mHC enabled; output normalization remains with the caller"
     )
     return mhc_pre_big_fuse, mhc_post_fwd
 
 
-def _native_mhc_enabled(residual: torch.Tensor) -> bool:
+def _aiter_tilelang_mhc_enabled(use_tilelang: bool) -> bool:
     from sglang.srt.environ import envs
 
     return (
-        is_hcu()
-        and envs.SGLANG_HCU_NATIVE_MHC.get()
-        and residual.ndim == 3
-        and residual.shape[0] > 0
-        and residual.shape[1:] == (4, 4096)
-        and residual.dtype == torch.bfloat16
-        and residual.is_cuda
-        and residual.is_contiguous()
+        use_tilelang
+        and is_hcu()
+        and envs.SGLANG_ROCM_USE_AITER_TILELANG_MHC.get()
     )
 
 
@@ -149,18 +143,9 @@ def around_native_mhc_pre(
     hc_sinkhorn_eps, hc_post_mult_value, sinkhorn_repeat,
     norm_weight=None, norm_eps=None,
 ):
-    if not (
-        _native_mhc_enabled(residual)
-        and fn.shape == (24, 16384)
-        and hc_scale.shape == (3,)
-        and hc_base.shape == (24,)
-        and all(
-            value.dtype == torch.float32
-            and value.device == residual.device
-            and value.is_contiguous()
-            for value in (fn, hc_scale, hc_base)
-        )
-    ):
+    from sglang.srt.environ import envs
+
+    if not _aiter_tilelang_mhc_enabled(envs.SGLANG_OPT_USE_TILELANG_MHC_PRE.get()):
         return original(
             residual, fn, hc_scale, hc_base, rms_eps, hc_pre_eps,
             hc_sinkhorn_eps, hc_post_mult_value, sinkhorn_repeat,
@@ -175,21 +160,9 @@ def around_native_mhc_pre(
 
 
 def around_native_mhc_post(original, x, residual, post_layer_mix, comb_res_mix):
-    if not (
-        _native_mhc_enabled(residual)
-        and x.shape == (residual.shape[0], 4096)
-        and x.dtype == torch.bfloat16
-        and x.device == residual.device
-        and x.is_contiguous()
-        and post_layer_mix.shape == (residual.shape[0], 4, 1)
-        and comb_res_mix.shape == (residual.shape[0], 4, 4)
-        and all(
-            value.dtype == torch.float32
-            and value.device == residual.device
-            and value.is_contiguous()
-            for value in (post_layer_mix, comb_res_mix)
-        )
-    ):
+    from sglang.srt.environ import envs
+
+    if not _aiter_tilelang_mhc_enabled(envs.SGLANG_OPT_USE_TILELANG_MHC_POST.get()):
         return original(x, residual, post_layer_mix, comb_res_mix)
     _, post = _native_mhc_functions()
     return post(x, residual, post_layer_mix.squeeze(-1), comb_res_mix)

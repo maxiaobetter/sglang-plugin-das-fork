@@ -4683,3 +4683,10 @@ Prefill 8-rank 调用核验通过，固定夹具输出一致。每请求 81 次�
 - 两条候选路径复用 0.5.22 worker 的选中行 top-k。eager 在 LM head 后选行，Graph 在 LM head 前选行并按请求复制当前输入、位置、接受数和 KV slot。新增 IFB replay 以固定的完整树宽展开 DSA 序列长度，FlashMLA KPool 长度沿用 eager 与 capture 的 64 对齐，KPool 写计划仍用实际接受数。概率 Hook 与量化实现沿固定组合执行。
 - 实装待验。需要在同一八卡组采三臂、逐 rank 的真实请求 profile，核对 Prefill、Draft、Verify、Draft Extend 和换输入后的同址重放，并对照 eager 的输出、缓存和下一轮 DSA seed。调用层完成后执行无 profiler 的同输入性能复验，再比对真实请求精度。
 - node16 三臂对照在原八卡准入等待超时后退出。当前改动的 GPU 调用、同址重放、无 profiler 性能和真实精度均待验证。
+
+## 2026-11-25 · HCU mHC 分发使用原生开关
+
+- 以原生 NMZ 镜像 SGLang 0.5.18 和候选 SGLang 0.5.22、adapter 0.5.22+hcu.1、插件 `f8cc638` 为基线。候选的 mHC pre 和 post 现在分别读取 `SGLANG_OPT_USE_TILELANG_MHC_PRE` 与 `SGLANG_OPT_USE_TILELANG_MHC_POST`，并共同依赖 `SGLANG_ROCM_USE_AITER_TILELANG_MHC`。HCU 开启对应阶段时调用与原生相同的 AITER 实现，输入契约由 AITER 校验。
+- AITER pre 保持 `n_splits=16`，并返回 `norm_fused=False` 交由模型执行输出 RMSNorm。各阶段关闭时回到该阶段当前有效的 SGLang 分发。
+- gfx938 单卡使用固定 GLM5Next 权重和 6／64 行 BF16 激活。原生与新候选的 mHC、Attention 和 FFN 的普通／融合 RMSNorm 在 eager 下实测 kernel、参数、次数和首发几何一致。各组同址 A→B→A 重放与对应 eager 输出逐位一致。逐 Graph kernel 的采集有缺口。
+- 八 rank 真实请求的 prefill、decode、MTP 和同址 Graph 重放仍待验证。
