@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from transformers.models.glm4v.configuration_glm4v import Glm4vVisionConfig
 
+from sglang.srt.environ import envs
 from sglang.srt.layers.attention.vision import (
     VisionAttention,
     VisionAttentionMetadata,
@@ -25,6 +26,8 @@ from sglang.srt.layers.rotary_embedding import get_rope
 from sglang.srt.models.glm4v import Glm4vRMSNorm, Glm4vVisionPatchEmbed
 from sglang.srt.runtime_context import get_parallel
 from sglang.srt.utils import add_prefix, is_npu
+
+from hcu_sglang.utils.detection import is_hcu
 
 
 @torch.compile
@@ -259,6 +262,20 @@ class Glm5NextVisionModel(nn.Module):
             is_neox_style=True,
         )
 
+        rope_cache = self.rotary_pos_emb.cos_sin_cache
+        rope_dtype = self.rotary_pos_emb.dtype
+        self.register_buffer(
+            "vision_rope_cache",
+            rope_cache.to(dtype=rope_dtype)
+            if (
+                is_hcu()
+                and not envs.SGLANG_ROPE_CACHE_FP32.get()
+                and rope_cache.dtype != rope_dtype
+            )
+            else None,
+            persistent=False,
+        )
+
         self.blocks = nn.ModuleList(
             [
                 Glm4vVisionBlock(
@@ -351,7 +368,10 @@ class Glm5NextVisionModel(nn.Module):
         max_grid_size = grid_thw[:, 1:].max()
 
         # Use pre-computed cos_sin_cache from RotaryEmbedding
-        cos, sin = self.rotary_pos_emb.get_cos_sin(max_grid_size)
+        if self.vision_rope_cache is None:
+            cos, sin = self.rotary_pos_emb.get_cos_sin(max_grid_size)
+        else:
+            cos, sin = self.vision_rope_cache[:max_grid_size].chunk(2, dim=-1)
 
         cos_combined = cos[pos_ids].flatten(1)
         sin_combined = sin[pos_ids].flatten(1)

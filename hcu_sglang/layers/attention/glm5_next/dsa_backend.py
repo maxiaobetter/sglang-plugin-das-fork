@@ -423,6 +423,18 @@ _DSA_IMPL_T: TypeAlias = Literal[
 ]
 
 
+def _align_flashmla_cache_seqlens(cache_seqlens: torch.Tensor) -> torch.Tensor:
+    topk_block_size = 64
+    return (
+        torch.div(
+            cache_seqlens + topk_block_size - 1,
+            topk_block_size,
+            rounding_mode="floor",
+        )
+        * topk_block_size
+    ).to(torch.int32)
+
+
 class NativeSparseAttnBackend(
     NativeSparseAttnBackendMTPPrecomputeMixin, AttentionBackend
 ):
@@ -437,6 +449,7 @@ class NativeSparseAttnBackend(
     ):
         super().__init__()
         self.model_runner = model_runner
+        self.use_fixed_width_draft_extend_replay = False
         self.hisparse_coordinator = model_runner.hisparse_coordinator
         self.forward_metadata: DSAMetadata
         self.token_to_kv_pool = model_runner.token_to_kv_pool
@@ -1084,15 +1097,9 @@ class NativeSparseAttnBackend(
             # requires params.topk (derived from cache_seqlens/metadata) to be
             # aligned to its TOPK_BLOCK_SIZE. The corresponding indices tensor
             # is padded with -1 in _forward_flashmla_kv.
-            topk_block_size = 64
-            dsa_cache_seqlens_int32 = (
-                torch.div(
-                    dsa_cache_seqlens_int32 + topk_block_size - 1,
-                    topk_block_size,
-                    rounding_mode="floor",
-                )
-                * topk_block_size
-            ).to(torch.int32)
+            dsa_cache_seqlens_int32 = _align_flashmla_cache_seqlens(
+                dsa_cache_seqlens_int32
+            )
         dsa_cache_seqlens_int32 = pad_dsa_cache_seqlens(
             forward_batch, dsa_cache_seqlens_int32
         )
@@ -1384,15 +1391,9 @@ class NativeSparseAttnBackend(
                 and _is_hcu
                 and self.dsa_index_kpool > 1
             ):
-                topk_block_size = 64
-                dsa_cache_seqlens_int32 = (
-                    torch.div(
-                        dsa_cache_seqlens_int32 + topk_block_size - 1,
-                        topk_block_size,
-                        rounding_mode="floor",
-                    )
-                    * topk_block_size
-                ).to(torch.int32)
+                dsa_cache_seqlens_int32 = _align_flashmla_cache_seqlens(
+                    dsa_cache_seqlens_int32
+                )
 
             seqlens_expanded = cache_seqlens_int32
             dsa_extend_seq_lens_list = [1] * num_tokens
@@ -1458,15 +1459,9 @@ class NativeSparseAttnBackend(
                 and _is_hcu
                 and self.dsa_index_kpool > 1
             ):
-                topk_block_size = 64
-                dsa_cache_seqlens_int32 = (
-                    torch.div(
-                        dsa_cache_seqlens_int32 + topk_block_size - 1,
-                        topk_block_size,
-                        rounding_mode="floor",
-                    )
-                    * topk_block_size
-                ).to(torch.int32)
+                dsa_cache_seqlens_int32 = _align_flashmla_cache_seqlens(
+                    dsa_cache_seqlens_int32
+                )
             dsa_extend_seq_lens_list = [1] * bs * self.speculative_num_draft_tokens
 
             if self.dsa_decode_impl == "flashmla_kv":
@@ -1657,7 +1652,11 @@ class NativeSparseAttnBackend(
 
             page_indices = self.req_to_token[req_pool_indices, :max_seqlen_k]
 
-            extend_seq_lens = spec_info.num_accept_tokens[:bs]
+            extend_seq_lens = (
+                spec_info.extend_seq_lens_tensor
+                if self.use_fixed_width_draft_extend_replay
+                else spec_info.num_accept_tokens
+            )[:bs]
             extend_num_tokens = bs * self.speculative_num_draft_tokens
             page_indices = torch.repeat_interleave(
                 page_indices,
@@ -1683,6 +1682,14 @@ class NativeSparseAttnBackend(
                 self.dsa_index_topk,
                 index_kpool=self.dsa_index_kpool,
             )
+            if (
+                self.use_fixed_width_draft_extend_replay
+                and self.dsa_decode_impl == "flashmla_kv"
+                and not self.use_mha
+                and _is_hcu
+                and self.dsa_index_kpool > 1
+            ):
+                dsa_cache_seqlens = _align_flashmla_cache_seqlens(dsa_cache_seqlens)
             metadata.dsa_cache_seqlens_int32[: seqlens_expanded.shape[0]].copy_(
                 dsa_cache_seqlens
             )

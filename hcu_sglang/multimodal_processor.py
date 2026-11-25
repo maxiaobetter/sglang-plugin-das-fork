@@ -40,10 +40,11 @@ async def around_process_mm_data_async(
 
 
 def register_hooks() -> None:
-    from hcu_sglang.multimodal import encoder_preprocessing
+    from hcu_sglang.multimodal import encoder_preprocessing, glm5next_processor
     from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
     encoder_preprocessing.register_hooks()
+    glm5next_processor.register_hooks()
     target = (
         "sglang.srt.multimodal.processors.transformers_auto."
         "TransformersAutoMultimodalProcessor"

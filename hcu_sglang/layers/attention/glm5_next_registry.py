@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 import time
 
-from hcu_sglang.glm5_next_policy import is_glm5_next_hcu
+from hcu_sglang.glm5_next_policy import is_glm5_flash_channel_fp8, is_glm5_next_hcu
 from hcu_sglang.utils.detection import is_hcu
 
 
@@ -60,6 +60,28 @@ def around_create_dsa_prefill_backend(original, factory):
     )
 
 
+def _supports_ifb_draft_extend_graph(worker, args):
+    from sglang.srt.runtime_context import get_spec
+
+    if (
+        args.nnodes != 1
+        or args.pp_size != 1
+        or args.attn_cp_size != 1
+        or not args.enable_dp_attention
+        or not (args.attn_dp_size == args.ep_size == args.tp_size > 1)
+        or args.speculative_algorithm != "EAGLE"
+        or worker.topk != 1
+        or getattr(worker, "draft_lm_head_vp", None) is not None
+        or get_spec().speculative_use_rejection_sampling
+    ):
+        return False
+    target_runner = worker.target_worker.model_runner
+    return is_glm5_flash_channel_fp8(
+        target_runner.model_config.hf_config,
+        getattr(target_runner.model, "quant_config", None),
+    )
+
+
 def after_capture_draft_graphs(_result, worker):
     if (
         worker.cuda_graph_runner_for_draft_extend is not None
@@ -81,18 +103,23 @@ def after_capture_draft_graphs(_result, worker):
     )
     from sglang.srt.utils import get_available_gpu_memory, log_info_on_rank0
 
-    mode = get_server_args().disaggregation_mode
     if (
         not isinstance(worker.draft_extend_attn_backend, NativeSparseAttnBackend)
-        or (
-            mode != "decode"
-            and (mode != "null" or not uses_native_draft_probabilities(worker))
-        )
         or worker.device != "cuda"
         or check_cuda_graph_backend(Phase.DECODE, Backend.DISABLED)
         or get_model().model_impl == "mindspore"
         or envs.SGLANG_DISABLE_DRAFT_EXTEND_CUDA_GRAPH.get()
     ):
+        return
+
+    args = get_server_args()
+    mode = args.disaggregation_mode
+    if mode == "null":
+        if not uses_native_draft_probabilities(worker):
+            if not _supports_ifb_draft_extend_graph(worker, args):
+                return
+            worker.draft_extend_attn_backend.use_fixed_width_draft_extend_replay = True
+    elif mode != "decode":
         return
 
     # The upstream backend allowlist does not include plugin DSA backends.

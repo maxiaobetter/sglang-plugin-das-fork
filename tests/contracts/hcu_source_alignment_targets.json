@@ -176,6 +176,8 @@
     "sglang.srt.disaggregation.decode.SchedulerDisaggregationDecodeMixin.process_decode_queue",
     "sglang.srt.disaggregation.decode.alloc_for_decode_prealloc",
     "sglang.srt.disaggregation.decode.alloc_for_decode_prealloc_hisparse",
+    "sglang.srt.disaggregation.encoder.preprocessor.EncoderPreprocessor._load_mm_processor",
+    "sglang.srt.disaggregation.encoder.receiver.MMReceiverBase.__init__",
     "sglang.srt.disaggregation.fake.conn.FakeKVReceiver.send_metadata",
     "sglang.srt.disaggregation.mooncake.conn.KVArgsRegisterInfo",
     "sglang.srt.disaggregation.mooncake.conn.MooncakeKVManager.__init__",
@@ -486,6 +488,7 @@
     "sglang.srt.managers.scheduler_pp_mixin.SchedulerPPMixin._pp_prepare_tensor_dict",
     "sglang.srt.managers.scheduler_pp_mixin.SchedulerPPMixin.event_loop_pp_disagg_prefill",
     "sglang.srt.managers.scheduler_pp_mixin.SchedulerPPMixin.process_bootstrapped_queue",
+    "sglang.srt.managers.tokenizer_manager.TokenizerManager._handle_epd_disaggregation_encode_request",
     "sglang.srt.managers.tp_worker.TpModelWorker.forward_batch_generation",
     "sglang.srt.mem_cache.allocation.assign_req_to_token_pool_func",
     "sglang.srt.mem_cache.allocation.get_last_loc",
@@ -745,6 +748,8 @@
     "sglang.srt.models.registry._ModelRegistry.resolve_model_cls",
     "sglang.srt.models.utils.enable_fused_set_kv_buffer",
     "sglang.srt.multimodal.encoder_preprocessing.EncoderMediaProcessorConfig",
+    "sglang.srt.multimodal.processors.base_processor.BaseMultimodalProcessor.get_mm_data",
+    "sglang.srt.multimodal.processors.glm4v.Glm4vImageProcessor.process_mm_data_async",
     "sglang.srt.multimodal.processors.transformers_auto.TransformersAutoMultimodalProcessor._build_mm_items",
     "sglang.srt.multimodal.processors.transformers_auto.TransformersAutoMultimodalProcessor.process_mm_data_async",
     "sglang.srt.rust_extensions.loader.load_rust_extension",
@@ -770,6 +775,7 @@
     "sglang.srt.speculative.spec_utils.commit_mamba_states_after_verify",
     "sglang.srt.speculative.uno_utils.sample_uno_tree_target_tokens",
     "sglang.srt.utils.common.get_cuda_graph_batch_size_alignment",
+    "sglang.srt.utils.hf_transformers.processor.get_processor",
     "uvicorn.run"
   ],
   "named_resolution_hooks": [

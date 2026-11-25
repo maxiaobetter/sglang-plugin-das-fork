@@ -29,6 +29,10 @@
 - [2026-11-19：GLM-5.3 FP8 稳态 prefill 优化](#2026-11-19-glm-53-fp8-稳态-prefill-优化)
 - [2026-11-19：静态 LPLB 产物校验](#2026-11-19-静态-lplb-产物校验)
 - [2026-11-24 · 单节点 CP Prefill 的 PD hidden 元数据门控](#2026-11-24--单节点-cp-prefill-的-pd-hidden-元数据门控)
+- [2026-11-24 · NMZ Encoder legacy processor](#2026-11-24--nmz-encoder-legacy-processor)
+- [2026-11-24 NMZ Decode Mooncake 接收组](#2026-11-24-nmz-decode-mooncake-接收组)
+- [2026-11-24 gfx938 Masked FP8 MoE 调用对齐](#2026-11-24-gfx938-masked-fp8-moe-调用对齐)
+- [2026-11-25 · NMZ IFB 的 MTP Draft Extend Graph](#2026-11-25--nmz-ifb-的-mtp-draft-extend-graph)
 - [附录：布局、操作方式与汇总](#附录布局操作方式与汇总)
 
 两份早期独立开发记录已全文收录（卷内同链）。历史结果不代表当前代码已重新验证。
@@ -702,6 +706,39 @@ git show de390225d615381d3fd02b8d3eed639e5ef529b5:docs/hcu-sglang-targets.json
 生成器 v5 补齐 KDA HIP、KV C++、Rust crate 和 AITER 配置的 package-data。输出复制 721 个插件文件，726 项清单 SHA256 核验通过；314 个非 Python 包资源均被打包规则覆盖。上游受跟踪修改只有 bootstrap、插件 loader 与 pyproject，来源/许可另由生成器清单记录。
 
 在仓库外、仅输出 python 的 PYTHONPATH 下屏蔽全部外部 entry point，并清空 SGLANG_PLUGINS，验证 `sglang` 和 `hcu_sglang` 均来自内嵌输出；597/597 Hook 全部应用，4 个具名 seam、0 errors。工具仓库 117 项单元测试通过，其中 13 项需显式开启的层运行时测试未执行。本轮没有构建输出 wheel、启动模型服务或进行数值/性能验收；只验证源码生成、资源规则和隔离加载。原始证据保存在 `artifacts/backtrack-20261102/`。
+
+## 2026-11-24 · NMZ Encoder legacy processor
+
+- 为 SGLang 0.5.22 补齐 GLM-5-Next 的嵌套 legacy `processor_config.json`。独立 Encoder 和语言侧 `get_processor` 共用同一组 image/video 配置与实现。checkpoint 提供自定义实现时走原有加载器。上游已提供 legacy loader 时保留其注册。
+- 视觉 processor 源自 node16 原生镜像 `local/sglang-glm53-flash-native-s9:984a010` 实装 SGLang `0.5.18+dtk2604.torch2110.2611091534.g66c3dd.zhipu`。三份实现文件分别以 SHA256 `04468f34c329`、`790125c1c885`、`31dba282a622` 识别。图像使用 checkpoint 的 patch 14、temporal 2、merge 2，保留 Transformers 5.12 的 bicubic 参数转接。
+- 节点原配置下，原生 984a010 与 NMZ 配方镜像 g49ac08 均对 BF16 视觉权重分配了压缩 FP8 参数。99 个线性层的 348,160 个通道 scale 都停留在初始化值，两张真图 embedding 全为 NaN。切换至用户提供的 SHA256 `686f8f5b6587…` 配置，新增 `re:^visual\..*` 排除规则。原生和候选的 99 个视觉投影均加载 BF16 权重，两张图的 embedding 均有限。
+- node16 同 b0、TP1，固定候选 plugin `31c4891` 与 adapter `00eaf49`。两张图每图 24 次 FA3 的模板和 launch 几何一致。语言侧三图的网格和完整输入 token、缩小猫图的 GPU bicubic 参数与 14 个 launch 已核对。最终 legacy 回退对应 `f6f479c`，resize 兼容及正确的视觉 `downsample` 权重名也已覆盖。
+- 同配置下，原生先将视觉 RoPE cos/sin 舍入为 BF16，再进行 FP32 乘加。官方 0.5.22 候选在这一位置默认保留 FP32。两张真实图的候选 embedding 相对 L2 分别为 0.1324 和 0.1349。仅对齐 cos/sin 舍入的单变量复验中，狗 3,833,856 个元素与猫 3,538,944 个元素逐位一致，SHA256 成对相等。plugin 在 HCU 上为视觉模型保留独立的原生精度缓存，保持显式 `SGLANG_ROPE_CACHE_FP32` 的效果及共享 RoPE 缓存。
+- 视频、graph 换输入重放、正式性能与真实 E→P→D 待验收。历史空 token 回退、混合预计算 embedding 与跨进程组的分支按真实 P/D 请求另核。
+
+## 2026-11-24 NMZ Decode Mooncake 接收组
+
+以插件 `31c4891`、adapter `00eaf49` 和官方 SGLang 0.5.22 为本轮基线。此前 node16 的 E1/P8/D4 真图试跑中，Decode DP0 收到 embedding 后在全 TP 组等待接收状态，其余 Decode rank 已进入 DP 同步。
+
+本轮在 `MMReceiverBase.__init__` 完成后为 HCU 的 language-only Mooncake Decode 选取接收组。门控限定 attention DP 开启、attention TP 和 CP 各为 1 的 scheduler receiver，接收计数和状态同步都使用本地 attention TP 组。保留官方的接收生命周期和 singleton collective。
+
+同机真图、四个 DP rank 的同址换输入重放和先前只读覆盖的结果已有独立记录。本轮已通过 CI 同参数 Ruff、quality-tools 和 L0 检查，覆盖接收组分支及 Hook 注册的本地检查通过。插件 Hook 实装在 node16 单机 E1/P8/D4 Mooncake TCP 复验，使用原版官方 receiver。与同卡组原生证据对照，两张真图各生成 16 个完全一致的 token，cache 命中 0。四个 D DP rank 均通过狗→猫→狗同址换输入重放。两臂各有 2 份 E、16 份 P 和 20 份 D trace，证据批次为 `r10-plugin`。
+
+调用门控仍存在差异。候选 D 仍随每张图触发额外一次 E 编码，真图 FA3 每图为原生 24 次、候选 48 次。狗图 MTP 接受数为原生 13、候选 14，猫图均为 13。D 本地多模态布局、MTP 和 grouped GEMM 调用差异仍待处理。完整 NMZ 双节点 D16/RDMA、正式性能和数据集精度待验证。
+
+### NMZ Mooncake 单图的 Decode 布局
+
+E、P、D 使用已核对为同一 GLM5Next legacy processor 配置的部署，可在 P、D 开启 `SGLANG_HCU_NMZ_EPD_IMAGE_LAYOUT=1`。当前只对 HCU、language-only、Mooncake 和单张内联 JPEG 启用。D 复用 EPD 的 token 展开和 mRoPE 计算，基于像素计算 hash 与 pad，再向调度器发送布局。P 从已收到的 encoder grid 补齐 mRoPE，复用原视觉 embedding 与 cache identity。包含视频、音频、预计算、外部 hash 或位置覆盖的 Decode 请求沿用已有分发。
+
+r14 同卡隔离诊断和原生独立探针确认，D 的输入 token、offsets、mRoPE、像素 hash 和 pad 均按原生布局生成。r17 正式插件实装使用官方 tokenizer 与 receiver，两张真图的候选 P/D 输入 token、offsets 与 mRoPE 逐项一致，P/D 各自保持 embedding 与像素的缓存身份来源。E 每图编码一次，FA3 每图 24 次。携带外部 hash 的真图保留 P/D 两次分发。候选四个 D rank 都完成狗→猫→狗同址换输入复验。
+
+r19 补齐同卡原生对照。两臂均完成四个 Decode rank 的同址重放，两张图各 16 个输出 token 一致，cache 命中均为 0。Decode 布局与原生对齐。Prefill 的 embedding hash、MTP 接受数与 grouped GEMM 仍有差异，正式 D16/RDMA 待验。
+
+## 2026-11-24 gfx938 Masked FP8 MoE 调用对齐
+
+原生 NMZ 的 gfx938 legacy channel FP8 MoE 在 DeepEP 低时延分发的两次 masked DeepGEMM 调用中，为 `expected_m <= 128` 显式传入 MODE 1001。node16 的原生与候选加载相同 DeepGEMM 二进制。已有 Decode profile 记录原生 bm128 和候选默认 bm64，调用数分别在 verify、draft、draft extend 一致。
+
+本轮在该路径复用原生 MODE 选择。大 M 与其他硬件使用库原有分发，保持量化、权重打包和 scale 接口。在 node16 单卡上用同一份 DeepGEMM 和固定合成 FP8 输入实测，MODE 1000 选 bm64，MODE 1001 选原生 bm128，有效行 BF16 输出一致。随后同卡 r23 真图在四个 Decode rank 的 VERIFY、DRAFT、DRAFT_EXTEND 分别采到 336、32、8 次 bm128 调用，每 rank 完成 8 组不同输入的同址重放。两张图最终输出与原生逐 token 一致。狗图第二轮 Verify 第五个 proposal 原生为 9859，候选在 MODE 1001 前后均为 2168。
 
 ## 附录：布局、操作方式与汇总
 
@@ -4638,3 +4675,11 @@ Prefill 8-rank 调用核验通过，固定夹具输出一致。每请求 81 次�
 - 在实际 Mooncake P/D 上，8 张固定 Prefill 卡关闭 HiCache，关 profiler，16 条预热，4096 token 的 C1 同进程交错 48 对。D 流式 TTFT p50 原路径 1068.47 ms、跳过 979.48 ms，配对中位减少 88.14 ms，95% CI 为减少 66.09–97.22 ms。两侧 48 对的 Decode token 序列一致，各接受 480 个 draft token。每个 Prefill rank 的 target 和 draft 各验证一次分支。
 - Docker 实装复验加载修改后的源码。两组不同的 4096-token 真实输入分别走保留和跳过路径，8 个 Prefill rank 的主模型与 NextN 各自观察到一次和零次 Gloo gather，每组的 target 和 draft capture mode 分别一致，两组的成对 Decode token 和 verify 次数一致。CI 对应 Ruff、L0、代码语法和生成导览校验已通过。
 - 本次收益只记录该真实请求与配方。raw-hidden 启用后的传输、跨节点执行、完整数据集精度和 graph 同址换输入复验仍待独立验证。
+
+## 2026-11-25 · NMZ IFB 的 MTP Draft Extend Graph
+
+- 基线为 SGLang 0.5.22、adapter 0.5.22+hcu.1 和插件 `31c4891` 的 NMZ 固定组合。独立参照为 NMZ 镜像内的原生 SGLang 0.5.18。原生 IFB 和候选独立 Decode 会捕获 Draft Extend Graph。候选 IFB 默认进入 eager，SGLang 的 HIP allowlist 未覆盖插件 DSA backend，而插件原有 IFB Graph 入口受原生 draft 概率开关约束。
+- 更改 `glm5_next_registry.after_capture_draft_graphs`。HCU 单节点 IFB、PP1、CP1、attention DP 与 EP 覆盖 TP、EAGLE top-k 1、目标模型实装为 Channel-FP8 动态 token 激活的组合，可以复用现有 Draft Extend Graph runner。新增入口排除 LM-head VP 和 rejection sampling。已有 Graph 禁用开关和 runner 的逐批回退仍生效。
+- 两条候选路径复用 0.5.22 worker 的选中行 top-k。eager 在 LM head 后选行，Graph 在 LM head 前选行并按请求复制当前输入、位置、接受数和 KV slot。新增 IFB replay 以固定的完整树宽展开 DSA 序列长度，FlashMLA KPool 长度沿用 eager 与 capture 的 64 对齐，KPool 写计划仍用实际接受数。概率 Hook 与量化实现沿固定组合执行。
+- 实装待验。需要在同一八卡组采三臂、逐 rank 的真实请求 profile，核对 Prefill、Draft、Verify、Draft Extend 和换输入后的同址重放，并对照 eager 的输出、缓存和下一轮 DSA seed。调用层完成后执行无 profiler 的同输入性能复验，再比对真实请求精度。
+- node16 三臂对照在原八卡准入等待超时后退出。当前改动的 GPU 调用、同址重放、无 profiler 性能和真实精度均待验证。
