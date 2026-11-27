@@ -136,6 +136,7 @@
     "sglang.srt.configs.glm5_next.Glm5NextVisionConfig",
     "sglang.srt.configs.mamba_utils.BaseLinearStateParams.replayssm_ring_bytes_per_req",
     "sglang.srt.configs.model_config.ModelConfig._verify_quantization",
+    "sglang.srt.constrained.grammar_manager.GrammarManager._pp_sync_ready_failed",
     "sglang.srt.disaggregation.base.conn.BaseKVReceiver.send_metadata",
     "sglang.srt.disaggregation.base.conn.StateType",
     "sglang.srt.disaggregation.common.conn.CommonKVBootstrapServer.__init__",

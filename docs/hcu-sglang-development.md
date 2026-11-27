@@ -4985,3 +4985,11 @@ audio Q、video Q、video MLP up 三种权重形状和合成 FP8 数据从空缓
 一致，NaN 位置一致。`2**31` 元素的最后一块也通过同一参考检查。
 独立反量化调用的 `torch.compile(fullgraph=True)` 三组尺寸对拍通过。
 本轮验证覆盖算子数值、JIT 复用和编译冒烟，整模型冷启动与端到端性能沿用此前各自的测量记录。
+
+## 2026-11-27 · CP rank 的 grammar 请求放行同步
+
+以官方 SGLang v0.5.22 的 `baa9befa38` 为宿主，插件和 adapter 分别从 fork 发布分支的 `b136f27` 和 `403e3a7` 核对。启用 attention-DP 且 CP 大于 1 时，请求覆盖同一副本的 attention-TP 和 CP，而宿主的 grammar 就绪同步覆盖 attention-TP。普通 CP8、attention-DP=1 使用完整 TP 组，已覆盖 CP。
+
+插件在 PP0 调用宿主的 PP 传递方法之前，用已有的 attention-CP CPU 组取 ready 交集与 failed 并集。该步骤接在宿主的 attention-TP 同步之后，覆盖同一副本，并沿用原 PP 传递。逻辑来自 [DAS 修复 #71](https://github.com/maxiaobetter/sglang-das/pull/71)。
+
+八进程 CPU/Gloo 使用该宿主的 `GrammarManager` 和 `HookRegistry` 运行受控就绪和超时对照。attention-TP1/CP4 与 attention-TP2/CP2 的双副本场景中，修复前共 6 个 rank 提前放行，修复后仅已全部就绪的副本先放行，另一副本等齐后再放行。还核对了 CP8/attention-DP1、CP1 路径及后续 PP stage 的传递入口。完整插件与 adapter 的 HCU 服务、Graph 和性能复验待测。

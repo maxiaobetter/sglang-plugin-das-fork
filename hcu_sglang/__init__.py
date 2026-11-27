@@ -29,6 +29,7 @@ def register() -> None:
         configs,
         disaggregation,
         distributed,
+        grammar_sync,
         kernel_compat,
         multimodal_processor,
         quick_all_reduce,
@@ -84,6 +85,7 @@ def register() -> None:
     batch_overlap.register_hooks()
     quick_all_reduce.register_hooks()
     distributed.register_hooks()
+    grammar_sync.register_hooks()
     disaggregation.register_hooks()
     kernel_compat.register_hooks()
     from hcu_sglang import sampling
