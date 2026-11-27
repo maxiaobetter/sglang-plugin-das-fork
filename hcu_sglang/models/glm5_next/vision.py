@@ -23,7 +23,11 @@ from sglang.srt.layers.linear import (
 )
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.rotary_embedding import get_rope
-from sglang.srt.models.glm4v import Glm4vRMSNorm, Glm4vVisionPatchEmbed
+from sglang.srt.models.glm4v import (
+    Glm4vRMSNorm,
+    Glm4vVisionPatchEmbed,
+    glm4v_vision_reduces_over_attn_tp,
+)
 from sglang.srt.runtime_context import get_parallel
 from sglang.srt.utils import add_prefix, is_npu
 
@@ -38,6 +42,12 @@ def swiglu_clamped(y: torch.Tensor, limit: float):
     return F.silu(gate) * up
 
 
+def _glm5_vision_parallel_group(use_data_parallel: bool) -> str:
+    if use_data_parallel:
+        return "replicated"
+    return "attn_tp" if glm4v_vision_reduces_over_attn_tp(False) else "tp"
+
+
 class Glm4vVisionMLP(nn.Module):
     def __init__(
         self,
@@ -50,15 +60,15 @@ class Glm4vVisionMLP(nn.Module):
         swiglu_limit: float = float("inf"),
     ):
         super().__init__()
-        self.tp_size = 1 if use_data_parallel else get_parallel().tp_size
-        self.tp_rank = 0 if use_data_parallel else get_parallel().tp_rank
+        self.tp_size = 1 if use_data_parallel else get_parallel().attn_tp_size
+        self.tp_rank = 0 if use_data_parallel else get_parallel().attn_tp_rank
         self.gate_up_proj = MergedColumnParallelLinear(
             input_size=in_features,
             output_sizes=[hidden_features] * 2,  # [gate_proj, up_proj]
             bias=bias,
             quant_config=quant_config,
             prefix=add_prefix("gate_up_proj", prefix),
-            parallel_group="replicated" if use_data_parallel else "tp",
+            parallel_group=_glm5_vision_parallel_group(use_data_parallel),
         )
         self.down_proj = RowParallelLinear(
             hidden_features,
@@ -66,7 +76,10 @@ class Glm4vVisionMLP(nn.Module):
             bias=bias,
             quant_config=quant_config,
             prefix=add_prefix("down_proj", prefix),
-            parallel_group="replicated" if use_data_parallel else "tp",
+            parallel_group=_glm5_vision_parallel_group(use_data_parallel),
+            use_dp_attention_reduce=glm4v_vision_reduces_over_attn_tp(
+                use_data_parallel
+            ),
         )
         self.act_fn = swiglu_clamped
         self.swiglu_limit = swiglu_limit
@@ -115,6 +128,9 @@ class Glm4vVisionBlock(nn.Module):
             prefix=add_prefix("attn", prefix),
             num_dummy_heads=num_dummy_heads,
             use_data_parallel=use_data_parallel,
+            use_dp_attention_reduce=glm4v_vision_reduces_over_attn_tp(
+                use_data_parallel
+            ),
         )
         self.mlp = Glm4vVisionMLP(
             dim,
@@ -176,8 +192,8 @@ class Glm4vPatchMerger(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = d_model
-        tp_size = 1 if use_data_parallel else get_parallel().tp_size
-        tp_rank = 0 if use_data_parallel else get_parallel().tp_rank
+        tp_size = 1 if use_data_parallel else get_parallel().attn_tp_size
+        tp_rank = 0 if use_data_parallel else get_parallel().attn_tp_rank
         self.proj = ReplicatedLinear(
             self.hidden_size,
             self.hidden_size,
@@ -192,7 +208,7 @@ class Glm4vPatchMerger(nn.Module):
             bias=bias,
             quant_config=quant_config,
             prefix=add_prefix("gate_up_proj", prefix),
-            parallel_group="replicated" if use_data_parallel else "tp",
+            parallel_group=_glm5_vision_parallel_group(use_data_parallel),
         )
         self.down_proj = RowParallelLinear(
             context_dim,
@@ -200,7 +216,10 @@ class Glm4vPatchMerger(nn.Module):
             bias=bias,
             quant_config=quant_config,
             prefix=add_prefix("down_proj", prefix),
-            parallel_group="replicated" if use_data_parallel else "tp",
+            parallel_group=_glm5_vision_parallel_group(use_data_parallel),
+            use_dp_attention_reduce=glm4v_vision_reduces_over_attn_tp(
+                use_data_parallel
+            ),
         )
         self.extra_activation_func = nn.GELU()
         self.swiglu_limit = swiglu_limit

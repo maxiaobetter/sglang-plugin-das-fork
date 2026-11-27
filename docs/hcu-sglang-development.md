@@ -4690,3 +4690,63 @@ Prefill 8-rank 调用核验通过，固定夹具输出一致。每请求 81 次�
 - AITER pre 保持 `n_splits=16`，并返回 `norm_fused=False` 交由模型执行输出 RMSNorm。各阶段关闭时回到该阶段当前有效的 SGLang 分发。
 - gfx938 单卡使用固定 GLM5Next 权重和 6／64 行 BF16 激活。原生与新候选的 mHC、Attention 和 FFN 的普通／融合 RMSNorm 在 eager 下实测 kernel、参数、次数和首发几何一致。各组同址 A→B→A 重放与对应 eager 输出逐位一致。逐 Graph kernel 的采集有缺口。
 - 八 rank 真实请求的 prefill、decode、MTP 和同址 Graph 重放仍待验证。
+
+
+## GLM5.3 Flash INT4 mixed-quantization and visual serving fixes (2026-11-27)
+
+Baseline: plugin 43bb7b8c, adapter 00eaf494, official SGLang baa9befa (0.5.22).
+This change preserves the tested runtime implementation and requires the companion
+adapter branch feat/glm53-flash-int4-fixes-20261127: provider ownership and dual
+DeepEP dispatch ABI compatibility. No official SGLang source is changed.
+
+### Changes and ownership
+
+- Select the W4A8 DeepEP HIPC method for HCU SlimQuant INT4 experts when the
+  existing DeepGEMM/DeepEP selection is active. Pack weights once and preserve
+  normal/low-latency dispatcher modes. Other selection remains unchanged.
+- Recognize SlimQuant configurations whose actual MTP expert method is native
+  W8A8Int8MoEMethod; ordinary INT4 and unrelated configurations stay excluded.
+- Align GLM5-Next visual MLP, attention output, and patch merger with attention-TP
+  reduction ownership under attention DP. Native Conv2d remains unchanged.
+- Tolerate Transformers versions without the optional video processor docstring
+  constant; BaseVideoProcessor remains required.
+- Register two standard AROUND hooks for GLM5-Next chat frontend construction and
+  template encoding. Fast tokenizers receive an immutable seed and per-thread
+  tokenizer/cache views, avoiding shared mutable padding state. Other model types
+  and slow tokenizers delegate unchanged. No new environment variable is added.
+
+The chat concurrency fix is included here as a narrow integration fix for this
+plugin model path. It does not replace global Transformers methods or claim to
+isolate other tokenizer consumers. Each encoding thread retains a tokenizer copy
+and up to 128 template cache entries; memory and sustained-load validation remain
+separate acceptance items.
+
+### Validation and limits
+
+The mixed-quantization and vision runtime was tested in the old DTK image with
+TP8 / attention DP8 / EP8, EAGLE MTP (5 steps / 6 draft tokens), and Decode Graph.
+GPQA Diamond scored 172/198 (86.87%; 18 capped outputs included as incorrect).
+OCRBench scored 895/1000 (89.5%, T=0/top_p=1); after a tokenizer concurrency error,
+645 cached results were retained and 355 completed at client concurrency 1.
+A separate T=1/top_p=0.95 wrong-item retest corrected 13/105 items; it is not a new
+full-dataset score. These are combination results, not plugin-only guarantees.
+
+The external prototype of tokenizer isolation passed 3 serial plus 24 client-C8
+image requests, all HTTP 200, correct answers and normal stop, with no Already
+borrowed. Three actual encoding threads used distinct tokenizer backends. Main
+API RSS increased about 445 MiB including warmup; no isolated performance claim.
+The standard-Hook packaging added in this branch has separate CPU registration
+and concurrency tests. The prototype service evidence is not represented as a
+GPU retest of this final packaging; sustained service testing remains pending.
+
+Tests can run against a pinned checkout using SGLANG_SOURCE_ROOT and
+python tests/runtime/tokenizer_concurrency_cpu.py (transformers/tokenizers needed).
+The test executes the real upstream render method and HookRegistry registration
+and application, reproduces the pre-fix padding conflict, checks 128 fixed calls
+at 8 threads, token-ID equality, cache/lossy modes, and other-model fallback.
+
+The branch CPU tests, visual parallel-group contract, targeted MTP INT8 selector
+tests and L0 gate passed. The guide was rebuilt and its freshness check passed;
+browser layout verification and final-Hook GPU service testing were not rerun.
+No model service or tested runtime directory was modified while preparing this
+publication branch.

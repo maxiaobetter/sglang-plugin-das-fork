@@ -90,6 +90,8 @@ def register() -> None:
     server_args.register()
     server_args_hooks.register()
     speculative_compat.register_hooks()
+    from hcu_sglang import tokenizer_concurrency
+    tokenizer_concurrency.register_hooks()
     multimodal_processor.register_hooks()
     batch_overlap.register_hooks()
     quick_all_reduce.register_hooks()

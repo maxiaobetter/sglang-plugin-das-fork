@@ -37,7 +37,15 @@ from transformers.image_utils import (
 )
 from transformers.processing_utils import Unpack, VideosKwargs
 from transformers.utils import TensorType, add_start_docstrings
-from transformers.video_processing_utils import BASE_VIDEO_PROCESSOR_DOCSTRING, BaseVideoProcessor
+try:
+    from transformers.video_processing_utils import (
+        BASE_VIDEO_PROCESSOR_DOCSTRING,
+        BaseVideoProcessor,
+    )
+except ImportError:
+    from transformers.video_processing_utils import BaseVideoProcessor
+
+    BASE_VIDEO_PROCESSOR_DOCSTRING = ""
 from transformers.video_utils import VideoMetadata, group_videos_by_shape, reorder_videos
 from .image_processing_glm5next import ResizeMode, _get_pad_content_size, smart_resize
 

@@ -90,6 +90,14 @@ class SlimQuantW4A8Int8Config(QuantizationConfig):
         return self.get_int4_moe_method()
 
     def get_int4_moe_method(self):
+        from hcu_sglang.utils.detection import is_hcu
+        from sglang.srt.layers.moe import get_moe_a2a_backend
+        from sglang.srt.utils import get_bool_env_var
+
+        if is_hcu() and get_bool_env_var("SGLANG_USE_DEEPGEMM_MOE") and get_moe_a2a_backend().is_deepep():
+            from hcu_sglang.layers.quantization.slimquant_deepep import SlimQuantDeepEPHIPCMethod
+
+            return SlimQuantDeepEPHIPCMethod(self)
         from hcu_sglang.layers.quantization.slimquant_w4a8 import (
             SlimQuantW4A8Int8MoEMethod,
         )
