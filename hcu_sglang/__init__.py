@@ -35,6 +35,7 @@ def register() -> None:
         server_args,
         server_args_hooks,
         speculative_compat,
+        tokenizer_concurrency,
     )
     from hcu_sglang import jit_overlay_loader
     from hcu_sglang.layers.attention import (
@@ -80,6 +81,7 @@ def register() -> None:
     server_args.register()
     server_args_hooks.register()
     speculative_compat.register_hooks()
+    tokenizer_concurrency.register_hooks()
     multimodal_processor.register_hooks()
     batch_overlap.register_hooks()
     quick_all_reduce.register_hooks()

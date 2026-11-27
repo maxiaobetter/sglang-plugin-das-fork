@@ -5010,3 +5010,31 @@ audio Q、video Q、video MLP up 三种权重形状和合成 FP8 数据从空缓
 一致，NaN 位置一致。`2**31` 元素的最后一块也通过同一参考检查。
 独立反量化调用的 `torch.compile(fullgraph=True)` 三组尺寸对拍通过。
 本轮验证覆盖算子数值、JIT 复用和编译冒烟，整模型冷启动与端到端性能沿用此前各自的测量记录。
+
+## 2026-11-27 GLM5-Next INT4 修复迁至 feature 分支
+
+本候选从 `maxiaobetter/sglang-plugin-das-fork` 的
+`feat/glm53-flash-int4-base`（`1c07eb2f`）建立干净分支，迁入此前运行组合的
+SlimQuant DeepEP HIPC、MTP INT8 方法判定及 tokenizer 线程隔离修复。
+旧组合基线为 `43bb7b8c`；两者历史已分叉，本次不复制旧私有 GLM 模型目录。
+
+量化接线单独提交：当前目标配置原先丢弃 checkpoint metadata，因此需保留
+`w4_dir`、`ignore`、`moe_int8_layers`，沿官方 mapper 更新 MTP 专家前缀，
+并用 loader AROUND Hook 转换打包 INT4 权重及 scale。没有上述 metadata 时保留
+目标原有方法选择。明确排除整个视觉塔时，视觉子层保持未量化；其他 ignore
+匹配沿用官方规则。HIPC 仍由已有 DeepGEMM/DeepEP 开关和 HCU 条件选择。
+MTP 仅在配置与实际方法均满足条件时进入 INT8 分支。
+
+并发修复通过正式 AROUND Hook 在 serving-chat 初始化时保存独立 tokenizer
+种子，各请求线程使用自己的 tokenizer 与模板缓存；仅作用于 HCU 下的
+`glm5_next` fast tokenizer。没有新增环境变量，其他模型和 slow tokenizer
+回到已有实现。独立 tokenizer 会增加 CPU 内存，不能从短测推断长期内存上限。
+
+2026-11-27 CPU 检查：metadata 回归使用真实官方 WeightsMapper、ignore 规则及
+INT8 方法构造，覆盖 MTP 前缀、HIPC 选择、loader 转换与缺省回退。
+tokenizer 回归调用真实官方 render 方法、HookRegistry 和 HF fast tokenizer，
+基线复现 `Already borrowed`，修复后 8 线程 128 条请求无错误，token IDs 一致，
+缓存、lossy 与其他模型回退通过。昂贵计算边界使用替身，未执行 GPU kernel。
+
+本次目标组合未重新启动服务，也未重新测量 Graph、完整精度或吞吐。
+此前其他提交组合的 GPQA/OCRBench 和性能数据不作为此候选的验收成绩。
