@@ -1,5 +1,8 @@
 {
   "expected_hook_targets": [
+    "sglang.srt.entrypoints.openai.serving_chat.OpenAIServingChat.__init__",
+    "sglang.srt.entrypoints.openai.serving_chat.OpenAIServingChat._render_and_encode_chat_template",
+    "sglang.srt.model_loader.loader.DefaultModelLoader._get_all_weights",
     "sglang.kernels.jit.utils.arch.get_default_target_flags",
     "sglang.kernels.jit.utils.compile.loader.load_jit",
     "sglang.kernels.ops.attention.dsa.index_buf_accessor._set_k_and_s_triton",

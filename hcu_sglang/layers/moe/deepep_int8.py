@@ -119,6 +119,14 @@ def _is_w8a8_int8_deepgemm_quant(
     if isinstance(quant_config, SlimQuantCompressedTensorsMarlinConfig):
         return True
 
+    from hcu_sglang.layers.quantization.slimquant_w4a8 import SlimQuantW4A8Int8Config
+    from sglang.srt.layers.quantization.w8a8_int8 import W8A8Int8MoEMethod
+
+    if isinstance(quant_config, SlimQuantW4A8Int8Config) and isinstance(
+        getattr(self, "quant_method", None), W8A8Int8MoEMethod
+    ):
+        return True
+
     scheme = getattr(self, "scheme", None)
     return (
         scheme is not None

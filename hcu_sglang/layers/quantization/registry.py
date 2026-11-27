@@ -147,6 +147,18 @@ def around_verify_quantization(original: Callable[..., Any], model_config):
         module.is_hip = original_is_hip
 
 
+def around_get_all_weights(original, loader, model_config, model):
+    weights = original(loader, model_config, model)
+    quant_config = getattr(model, "quant_config", None)
+    converter = getattr(quant_config, "convert_weights", None)
+    if (
+        type(quant_config).__module__.startswith("hcu_sglang.layers.quantization.")
+        and callable(converter)
+    ):
+        return converter(weights)
+    return weights
+
+
 def register_hooks() -> None:
     from sglang.srt.plugins.hook_registry import HookRegistry, HookType
 
@@ -158,5 +170,10 @@ def register_hooks() -> None:
     HookRegistry.register(
         "sglang.srt.configs.model_config.ModelConfig._verify_quantization",
         around_verify_quantization,
+        HookType.AROUND,
+    )
+    HookRegistry.register(
+        "sglang.srt.model_loader.loader.DefaultModelLoader._get_all_weights",
+        around_get_all_weights,
         HookType.AROUND,
     )
