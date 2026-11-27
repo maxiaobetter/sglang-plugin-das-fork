@@ -637,6 +637,10 @@ def forward_groupgemm_w8a8_fp8_masked(
 
 def around_ep_init(original, layer, *args, **kwargs):
     result = original(layer, *args, **kwargs)
+    if _is_hcu and getattr(getattr(layer, "quant_method", None), "hcu_slimquant_deepep_hipc", False):
+        from hcu_sglang.layers.quantization.slimquant_deepep import configure_layer
+
+        configure_layer(layer)
     if _is_hcu:
         import inspect
         from hcu_sglang.layers.moe import mori_das

@@ -210,8 +210,28 @@ class SlimQuantW4A8Int8Config(QuantizationConfig):
     - Activation: dynamic, per-token, symmetric
     """
 
-    def __init__(self):
-        pass
+    def __init__(self, config=None):
+        super().__init__()
+        config = {} if config is None else dict(config)
+        self._hcu_mixed_quantization = any(
+            name in config for name in ("w4_dir", "moe_int8_layers", "ignore")
+        )
+        self.quant_description = config
+        self.ignore = list(config.get("ignore") or [])
+        self.packed_modules_mapping = dict(config.get("packed_modules_mapping") or {})
+        self.moe_int8_layers = set(config.get("moe_int8_layers") or [])
+        self.moe_int8_prefixes = [
+            f"model.layers.{index}.mlp.experts"
+            for index in sorted(self.moe_int8_layers)
+        ]
+        self.w4_dir = config.get("w4_dir", False)
+        if self._hcu_mixed_quantization:
+            if config.get("weight_bits", 4) != 4:
+                raise ValueError("SlimQuant W4A8 requires weight_bits=4")
+            if config.get("group_size", -1) != -1 or config.get("sym", True) is not True:
+                raise ValueError("SlimQuant W4A8 requires symmetric per-channel weights")
+            if not isinstance(self.w4_dir, bool):
+                raise ValueError("SlimQuant w4_dir must be a boolean")
 
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
@@ -231,7 +251,12 @@ class SlimQuantW4A8Int8Config(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "SlimQuantW4A8Int8Config":
-        return cls()
+        return cls(config)
+
+    def apply_weight_name_mapper(self, hf_to_sglang_mapper):
+        if self._hcu_mixed_quantization:
+            self.ignore = list(dict.fromkeys(hf_to_sglang_mapper.apply_list(self.ignore)))
+            self.moe_int8_prefixes = hf_to_sglang_mapper.apply_list(self.moe_int8_prefixes)
 
     def get_quant_method(
         self,
@@ -241,13 +266,81 @@ class SlimQuantW4A8Int8Config(QuantizationConfig):
         from sglang.srt.layers.moe.fused_moe_triton import (
             FusedMoE,
         )
-        from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
+        from sglang.srt.layers.quantization.unquant import (
+            UnquantizedFusedMoEMethod,
+            UnquantizedLinearMethod,
+        )
 
+        if not isinstance(layer, (LinearBase, FusedMoE)):
+            return None
+        if self._hcu_mixed_quantization:
+            from sglang.srt.layers.quantization.compressed_tensors.utils import (
+                should_ignore_layer,
+            )
+
+            ignore_visual = any(
+                root in ("visual", "model.visual")
+                and (prefix == root or prefix.startswith(root + "."))
+                for root in self.ignore
+            )
+            if ignore_visual or should_ignore_layer(
+                prefix, self.ignore, self.packed_modules_mapping
+            ):
+                if isinstance(layer, FusedMoE):
+                    return UnquantizedFusedMoEMethod()
+                return UnquantizedLinearMethod()
+            if isinstance(layer, LinearBase):
+                return SlimQuantW4A8Int8LinearMethod(self)
+            if (
+                prefix in self.moe_int8_prefixes
+                or getattr(layer, "layer_id", None) in self.moe_int8_layers
+            ):
+                from sglang.srt.layers.quantization.w8a8_int8 import W8A8Int8MoEMethod
+
+                return W8A8Int8MoEMethod(self)
         if isinstance(layer, LinearBase):
             return UnquantizedLinearMethod()
         elif isinstance(layer, FusedMoE):
-            return SlimQuantW4A8Int8MoEMethod(self)
+            return self.get_int4_moe_method()
         return None
+
+    def get_int4_moe_method(self):
+        if self._hcu_mixed_quantization:
+            from hcu_sglang.utils.detection import is_hcu
+            from sglang.srt.layers.moe import get_moe_a2a_backend
+
+            if (
+                is_hcu()
+                and get_bool_env_var("SGLANG_USE_DEEPGEMM_MOE")
+                and get_moe_a2a_backend().is_deepep()
+            ):
+                from hcu_sglang.layers.quantization.slimquant_deepep import (
+                    SlimQuantDeepEPHIPCMethod,
+                )
+
+                return SlimQuantDeepEPHIPCMethod(self)
+        return SlimQuantW4A8Int8MoEMethod(self)
+
+    def convert_weights(self, weights):
+        if not self.w4_dir:
+            yield from weights
+            return
+        for name, tensor in weights:
+            if name.endswith(".qweight"):
+                if tensor.dtype != torch.uint8 or tensor.ndim != 2:
+                    raise ValueError(f"Expected uint8 [N, K/2] SlimQuant qweight: {name}")
+                packed = ((tensor & 15) << 4) | (tensor >> 4)
+                yield name.removesuffix(".qweight") + ".weight", packed.view(torch.int8)
+            elif name.endswith(".scales"):
+                if (
+                    tensor.ndim != 2
+                    or tensor.shape[1] != 1
+                    or not tensor.is_floating_point()
+                ):
+                    raise ValueError(f"Expected floating [N, 1] SlimQuant scales: {name}")
+                yield name.removesuffix(".scales") + ".weight_scale", tensor.float() / 16
+            else:
+                yield name, tensor
 
     def get_scaled_act_names(self) -> List[str]:
         return []
